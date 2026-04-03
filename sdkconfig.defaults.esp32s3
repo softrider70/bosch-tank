@@ -1,0 +1,19 @@
+# ESP32-S3 (Dual-core, 512KB SRAM, PSRAM, dual USB)
+# This file extends sdkconfig.defaults with ESP32-S3-specific settings
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# ESP32-S3 has dual cores, no need for FREERTOS_NO_AFFINITY
+CONFIG_FREERTOS_UNICORE=n
+
+# S3 has built-in PSRAM (8MB typical)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_USE=y
+
+# S3-specific performance
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_160=y
+
+# USB support (optional)
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_USB_CDC=y

@@ -1,0 +1,15 @@
+# ESP32 (Dual-core, 520KB SRAM, optional PSRAM)
+# This file extends sdkconfig.defaults with ESP32-specific settings
+
+CONFIG_IDF_TARGET="esp32"
+CONFIG_ESP32_CHIP_REVISION_AUTO=y
+
+# ESP32 has dual cores, no need for FREERTOS_NO_AFFINITY
+CONFIG_FREERTOS_UNICORE=n
+
+# PSRAM configuration (optional, only if your board has PSRAM)
+# CONFIG_SPIRAM=y
+# CONFIG_SPIRAM_MODE_QUAD=y
+
+# Default to 40MHz if PSRAM not available
+CONFIG_ESP32_DEFAULT_CPU_FREQ_160=y

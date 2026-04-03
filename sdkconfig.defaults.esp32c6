@@ -1,0 +1,18 @@
+# ESP32-C6 (Dual-core RISC-V, 512KB SRAM, PSRAM, Thread support)
+# This file extends sdkconfig.defaults with ESP32-C6-specific settings
+
+CONFIG_IDF_TARGET="esp32c6"
+
+# ESP32-C6 has dual cores, no need for FREERTOS_NO_AFFINITY
+CONFIG_FREERTOS_UNICORE=n
+
+# C6 has built-in PSRAM (4MB typical)
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_USE=y
+
+# C6-specific performance
+CONFIG_ESP32C6_DEFAULT_CPU_FREQ_160=y
+
+# Thread (OpenThread) support (optional)
+# CONFIG_OPENTHREAD_ENABLED=y

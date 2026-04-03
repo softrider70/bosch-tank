@@ -1,0 +1,16 @@
+# ESP32-S2 (Single-core RISC-V, 320KB SRAM)
+# This file extends sdkconfig.defaults with ESP32-S2-specific settings
+
+CONFIG_IDF_TARGET="esp32s2"
+
+# ESP32-S2 is single-core RISC-V architecture
+# CRITICAL: Must disable FreeRTOS core affinity for single-core systems
+CONFIG_FREERTOS_UNICORE=y
+CONFIG_FREERTOS_NO_AFFINITY=y
+
+# S2-specific performance settings
+CONFIG_ESP32S2_DEFAULT_CPU_FREQ_160=y
+
+# PSRAM configuration (if available on your board)
+# CONFIG_SPIRAM=y
+# CONFIG_SPIRAM_MODE_QUAD=y

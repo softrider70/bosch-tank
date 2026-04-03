@@ -1,0 +1,16 @@
+{
+    "git.ignoreLimitWarning": true,
+    "github.copilot.chat.welcomeMessage": "never",
+    "github.copilot.advanced": {
+        "debug.overrideChatModel": "gpt-4",
+        "debug.testRequestMocking": false,
+        "debug.overrideProxyUrl": null
+    },
+    "[c]": {
+        "editor.defaultFormatter": "ms-vscode.cpptools",
+        "editor.formatOnSave": false
+    },
+    "idf.flashBaudRate": "921600",
+    "idf.openOcdConfigs": ["interface/ftdi/esp32_devkitj_v1.cfg", "target/esp32.cfg"],
+    "idf.showOnboardingOnInit": false
+}

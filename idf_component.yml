@@ -1,0 +1,16 @@
+version: "1.1"
+description: "delongi-tank - ESP32 Application"
+url: "https://github.com/your-org/delongi-tank"
+
+dependencies:
+  # Add your component dependencies here
+  # Example: json_parser:
+  #   version: "^1.0.0"
+  # 
+  # For more info, see:
+  # https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/components.html
+
+# Optional: Define component metadata
+# examples:
+#   example_name:
+#     description: "Example description"

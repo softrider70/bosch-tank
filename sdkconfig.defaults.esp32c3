@@ -1,0 +1,15 @@
+# ESP32-C3 (Single-core RISC-V, 400KB SRAM)
+# This file extends sdkconfig.defaults with ESP32-C3-specific settings
+
+CONFIG_IDF_TARGET="esp32c3"
+
+# ESP32-C3 is single-core RISC-V architecture
+# CRITICAL: Must disable FreeRTOS core affinity for single-core systems
+CONFIG_FREERTOS_UNICORE=y
+CONFIG_FREERTOS_NO_AFFINITY=y
+
+# C3-specific configuration
+CONFIG_ESP32C3_DEFAULT_CPU_FREQ_160=y
+
+# No PSRAM support on C3
+CONFIG_SPIRAM_USE=n
