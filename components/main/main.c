@@ -893,213 +893,415 @@ updateDashboard();
 // ============================================================================
 
 // ============================================================================
-// VL53L0X Sensor I2C Communication Helpers (ESP-IDF v6.0 compatible)
+// VL53L0X Pololu Library Port (v1.3.0 → ESP-IDF C)
+// Based on: https://github.com/pololu/vl53l0x-arduino
 // ============================================================================
 
-/**
- * @brief Scan I2C bus for all devices (diagnostic tool)
- * Tests addresses 0x00-0x7F and logs which ones respond
- */
+// --- VL53L0X Register Map (from Pololu VL53L0X.h) ---
+#define SYSRANGE_START                              0x00
+#define SYSTEM_SEQUENCE_CONFIG                      0x01
+#define SYSTEM_INTERMEASUREMENT_PERIOD              0x04
+#define SYSTEM_INTERRUPT_CONFIG_GPIO                0x0A
+#define GPIO_HV_MUX_ACTIVE_HIGH                     0x84
+#define SYSTEM_INTERRUPT_CLEAR                      0x0B
+#define RESULT_INTERRUPT_STATUS                     0x13
+#define RESULT_RANGE_STATUS                         0x14
+#define CROSSTALK_COMPENSATION_PEAK_RATE_MCPS       0x20
+#define I2C_SLAVE_DEVICE_ADDRESS                    0x8A
+#define MSRC_CONFIG_CONTROL                         0x60
+#define PRE_RANGE_CONFIG_MIN_SNR                    0x27
+#define PRE_RANGE_CONFIG_VALID_PHASE_LOW            0x56
+#define PRE_RANGE_CONFIG_VALID_PHASE_HIGH           0x57
+#define PRE_RANGE_MIN_COUNT_RATE_RTN_LIMIT          0x64
+#define FINAL_RANGE_CONFIG_MIN_SNR                  0x67
+#define FINAL_RANGE_CONFIG_VALID_PHASE_LOW          0x47
+#define FINAL_RANGE_CONFIG_VALID_PHASE_HIGH         0x48
+#define FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT 0x44
+#define PRE_RANGE_CONFIG_SIGMA_THRESH_HI            0x61
+#define PRE_RANGE_CONFIG_SIGMA_THRESH_LO            0x62
+#define PRE_RANGE_CONFIG_VCSEL_PERIOD               0x50
+#define PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI          0x51
+#define PRE_RANGE_CONFIG_TIMEOUT_MACROP_LO          0x52
+#define FINAL_RANGE_CONFIG_VCSEL_PERIOD             0x70
+#define FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI        0x71
+#define FINAL_RANGE_CONFIG_TIMEOUT_MACROP_LO        0x72
+#define MSRC_CONFIG_TIMEOUT_MACROP                  0x46
+#define IDENTIFICATION_MODEL_ID                     0xC0
+#define IDENTIFICATION_REVISION_ID                  0xC2
+#define OSC_CALIBRATE_VAL                           0xF8
+#define GLOBAL_CONFIG_VCSEL_WIDTH                   0x32
+#define GLOBAL_CONFIG_SPAD_ENABLES_REF_0            0xB0
+#define GLOBAL_CONFIG_REF_EN_START_SELECT           0xB6
+#define DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD         0x4E
+#define DYNAMIC_SPAD_REF_EN_START_OFFSET            0x4F
+#define ALGO_PHASECAL_LIM                           0x30
+#define ALGO_PHASECAL_CONFIG_TIMEOUT                0x30
+#define VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV           0x89
+
+// Module-level state
+static uint8_t vl53l0x_stop_variable = 0;
+
+// --- I2C Low-Level Helpers ---
+
+static esp_err_t vl53l0x_write_reg(uint8_t reg, uint8_t value)
+{
+    uint8_t data[2] = {reg, value};
+    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, data, 2, 100);
+}
+
+static esp_err_t vl53l0x_write_reg16(uint8_t reg, uint16_t value)
+{
+    uint8_t data[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
+    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, data, 3, 100);
+}
+
+static esp_err_t __attribute__((unused)) vl53l0x_write_reg32(uint8_t reg, uint32_t value)
+{
+    uint8_t data[5] = {reg, (uint8_t)(value >> 24), (uint8_t)(value >> 16),
+                       (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
+    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, data, 5, 100);
+}
+
+static esp_err_t vl53l0x_write_multi(uint8_t reg, const uint8_t *src, uint8_t count)
+{
+    uint8_t buf[count + 1];
+    buf[0] = reg;
+    memcpy(&buf[1], src, count);
+    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, buf, count + 1, 100);
+}
+
+static uint8_t vl53l0x_read_reg(uint8_t reg)
+{
+    uint8_t value = 0;
+    i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR, &reg, 1, &value, 1, 100);
+    return value;
+}
+
+static uint16_t vl53l0x_read_reg16(uint8_t reg)
+{
+    uint8_t data[2] = {0};
+    i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR, &reg, 1, data, 2, 100);
+    return ((uint16_t)data[0] << 8) | data[1];
+}
+
+static esp_err_t vl53l0x_read_multi(uint8_t reg, uint8_t *dst, uint8_t count)
+{
+    return i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR, &reg, 1, dst, count, 100);
+}
+
+// --- I2C Bus Scan (optimized) ---
+
 static void i2c_scan_bus(void)
 {
-    ESP_LOGI(TAG, "🔍 Starting I2C bus scan...");
-    ESP_LOGI(TAG, "   Scanning addresses 0x00-0x7F");
-    
-    int devices_found = 0;
-    char found_addrs[256] = "";
-    
-    for (uint8_t addr = 0x03; addr < 0x78; addr++) {  // 0x03-0x77 (skip reserved)
-        // Probe address with a 1-byte register read (reg 0x00)
-        uint8_t reg = 0x00;
-        uint8_t dummy = 0;
-        esp_err_t ret = i2c_master_write_read_device(I2C_MASTER_PORT, addr,
-                                                      &reg, 1,     // write reg addr
-                                                      &dummy, 1,   // read 1 byte
-                                                      50);         // 50ms timeout
-        
+    ESP_LOGI(TAG, "🔍 I2C bus scan (0x03-0x77)...");
+    int found = 0;
+    for (uint8_t addr = 0x03; addr < 0x78; addr++) {
+        uint8_t reg = 0;
+        esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_PORT, addr, &reg, 1, 20);
         if (ret == ESP_OK) {
-            ESP_LOGI(TAG, "   ✅ Device found at 0x%02X", addr);
-            snprintf(found_addrs + strlen(found_addrs), sizeof(found_addrs) - strlen(found_addrs),
-                     "0x%02X ", addr);
-            devices_found++;
+            const char *name = (addr == 0x29) ? " (VL53L0X)" :
+                               (addr == 0x52) ? " (EEPROM)" :
+                               (addr == 0x68) ? " (MPU6050)" :
+                               (addr == 0x76) ? " (BME280)" : "";
+            ESP_LOGI(TAG, "   ✅ 0x%02X%s", addr, name);
+            found++;
         }
     }
-    
-    if (devices_found > 0) {
-        ESP_LOGI(TAG, "🎯 I2C Scan complete: Found %d device(s)", devices_found);
-        ESP_LOGI(TAG, "   Addresses: %s", found_addrs);
-    } else {
-        ESP_LOGE(TAG, "❌ I2C Scan complete: NO devices found!");
-        ESP_LOGW(TAG, "   Possible issues:");
-        ESP_LOGW(TAG, "   - No pull-up resistors on SDA/SCL (need 4.7k)");
-        ESP_LOGW(TAG, "   - Sensor not powered");
-        ESP_LOGW(TAG, "   - I2C bus shorted");
-        ESP_LOGW(TAG, "   - Wrong pins (SDA=21, SCL=22)");
-    }
+    ESP_LOGI(TAG, "   Scan: %d device(s) found", found);
 }
 
-/**
- * @brief Read a byte from VL53L0X register
- */
-static esp_err_t vl53l0x_read_byte(uint8_t reg, uint8_t *value)
-{
-    // Use i2c_master_write_read_device for transactional read
-    return i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR,
-                                        &reg, 1,  // write reg address
-                                        value, 1,  // read value
-                                        100);  // timeout 100ms
-}
+// --- Pololu: getSpadInfo() ---
 
-/**
- * @brief Write a byte to VL53L0X register
- */
-static esp_err_t vl53l0x_write_byte(uint8_t reg, uint8_t value)
+static bool vl53l0x_get_spad_info(uint8_t *count, bool *type_is_aperture)
 {
-    // Write register + value in one transaction
-    uint8_t data[2] = {reg, value};
-    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR,
-                                      data, 2, 100);  // timeout 100ms
-}
-
-// VL53L0X Register Definitions (Pololu Library v1.3.0)
-#define VL53L0X_REG_SYSRANGE_START 0x00
-#define VL53L0X_REG_RESULT_INTERRUPT_STATUS 0x13
-#define VL53L0X_REG_RESULT_RANGE_STATUS 0x14
-
-/**
- * @brief Check if VL53L0X sensor is present on I2C bus
- */
-static bool vl53l0x_sensor_ready(void)
-{
-    uint8_t chip_id = 0;
-    esp_err_t ret = vl53l0x_read_byte(0xC0, &chip_id);
+    uint8_t tmp;
+    vl53l0x_write_reg(0x80, 0x01);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x00, 0x00);
+    vl53l0x_write_reg(0xFF, 0x06);
+    vl53l0x_write_reg(0x83, vl53l0x_read_reg(0x83) | 0x04);
+    vl53l0x_write_reg(0xFF, 0x07);
+    vl53l0x_write_reg(0x81, 0x01);
+    vl53l0x_write_reg(0x80, 0x01);
+    vl53l0x_write_reg(0x94, 0x6b);
+    vl53l0x_write_reg(0x83, 0x00);
     
-    if (ret == ESP_OK && chip_id == 0xEE) {
-        ESP_LOGI(TAG, "✅ VL53L0X FOUND (Model 0x%02X)", chip_id);
-        return true;
-    }
-    
-    ESP_LOGE(TAG, "❌ VL53L0X not found (got 0x%02X, ret=%d)", chip_id, ret);
-    return false;
-}
-
-/**
- * @brief Initialize VL53L0X sensor (MINIMAL Pololu Arduino ported)
- * 
- * This is a minimal version focusing on core functionality.
- * The full Pololu init has too many register writes that may fail over I2C.
- */
-static esp_err_t vl53l0x_init(void)
-{
-    uint8_t u8data;
-    esp_err_t ret;
-    
-    ESP_LOGI(TAG, "🔧 VL53L0X init (minimal Pololu)...");
-    
-    // Verify model ID (0xC0 should be 0xEE)
-    ret = vl53l0x_read_byte(0xC0, &u8data);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "❌ Cannot read Model ID register");
-        return ESP_FAIL;
-    }
-    
-    if (u8data != 0xEE) {
-        ESP_LOGE(TAG, "❌ Model ID 0x%02X invalid (expected 0xEE)", u8data);
-        return ESP_FAIL;
-    }
-    
-    // Read revision
-    vl53l0x_read_byte(0xC2, &u8data);
-    ESP_LOGI(TAG, "Revision: 0x%02X", u8data);
-    
-    // Minimal init sequence (Pololu essentials only)
-    // The actual timing comes from the measurement polling, not init
-    
-    // Page select and reset
-    vl53l0x_write_byte(0xFF, 0x01);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    
-    vl53l0x_write_byte(0x00, 0x00);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    
-    vl53l0x_write_byte(0xFF, 0x00);
-    vTaskDelay(pdMS_TO_TICKS(5));
-    
-    // Start measurement immediately (0x00 = Sysrange Start, 0x01 = single shot)
-    vl53l0x_write_byte(0x00, 0x01);
-    vTaskDelay(pdMS_TO_TICKS(100));  // 100ms for first measurement
-    
-    ESP_LOGI(TAG, "✅ VL53L0X init complete");
-    return ESP_OK;
-}
-
-/**
- * @brief Read VL53L0X distance measurement (Pololu polling method - ROBUST)
- * 
- * Simplified Pololu algorithm for better stability:
- * 1. Trigger measurement
- * 2. Poll Result Interrupt Status until ready
- * 3. Read range result 
- * 4. Clear interrupt
- * 5. Return distance in mm
- */
-static uint16_t vl53l0x_read_distance_mm_sync(void)
-{
-    uint8_t status = 0;
-    uint32_t tick_start = esp_timer_get_time() / 1000;
-    uint16_t distance_mm = 0;
-    int timeout_ms = 300;  // 300ms timeout for measurement
-    int retry_count = 0;
-    
-    // Step 1: Start measurement
-    esp_err_t ret = vl53l0x_write_byte(0x00, 0x01);  // Sysrange Start
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "❌ Failed to start measurement");
-        return 0;
-    }
-    
-    // Small delay for measurement to start
-    vTaskDelay(pdMS_TO_TICKS(10));
-    
-    // Step 2: Poll Result Interrupt Status register
-    // Bit 0 of reg 0x13 = 1 when result is ready
-    while ((status & 0x01) == 0 && retry_count < 300) {
-        ret = vl53l0x_read_byte(0x13, &status);
-        if (ret != ESP_OK) {
-            // I2C read failed - not critical, retry
-            ESP_LOGD(TAG, "I2C read error polling status");
-        }
-        
-        retry_count++;
-        uint32_t elapsed = (esp_timer_get_time() / 1000) - tick_start;
-        if (elapsed > timeout_ms) {
-            ESP_LOGW(TAG, "⏱️  Timeout waiting for meas (status=0x%02X, tries=%d)", status, retry_count);
-            return 0;
-        }
-        
-        // Yield to other tasks
+    uint32_t start = esp_timer_get_time() / 1000;
+    while (vl53l0x_read_reg(0x83) == 0x00) {
+        if ((esp_timer_get_time() / 1000 - start) > 500) return false;
         vTaskDelay(pdMS_TO_TICKS(1));
     }
     
-    // Step 3: Read range result from 0x14-0x15 (big-endian, units=mm)
-    uint8_t reg = 0x14;
-    uint8_t data[2] = {0, 0};
-    ret = i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR,
-                                       &reg, 1, data, 2, 50);
+    vl53l0x_write_reg(0x83, 0x01);
+    tmp = vl53l0x_read_reg(0x92);
+    *count = tmp & 0x7F;
+    *type_is_aperture = (tmp >> 7) & 0x01;
     
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "❌ Failed to read distance register");
-        return 0;
+    vl53l0x_write_reg(0x81, 0x00);
+    vl53l0x_write_reg(0xFF, 0x06);
+    vl53l0x_write_reg(0x83, vl53l0x_read_reg(0x83) & ~0x04);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x00, 0x01);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x80, 0x00);
+    return true;
+}
+
+// --- Pololu: performSingleRefCalibration() ---
+
+static bool vl53l0x_perform_single_ref_calibration(uint8_t vhv_init_byte)
+{
+    vl53l0x_write_reg(SYSRANGE_START, 0x01 | vhv_init_byte);
+    
+    uint32_t start = esp_timer_get_time() / 1000;
+    while ((vl53l0x_read_reg(RESULT_INTERRUPT_STATUS) & 0x07) == 0) {
+        if ((esp_timer_get_time() / 1000 - start) > 500) return false;
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
     
-    // Convert big-endian to distance  
-    distance_mm = ((uint16_t)data[0] << 8) | data[1];
+    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x01);
+    vl53l0x_write_reg(SYSRANGE_START, 0x00);
+    return true;
+}
+
+// --- Pololu: Full init() sequence ---
+
+static bool vl53l0x_sensor_ready(void)
+{
+    uint8_t id = vl53l0x_read_reg(IDENTIFICATION_MODEL_ID);
+    if (id == 0xEE) {
+        ESP_LOGI(TAG, "✅ VL53L0X FOUND (Model 0x%02X, Rev 0x%02X)",
+                 id, vl53l0x_read_reg(IDENTIFICATION_REVISION_ID));
+        return true;
+    }
+    ESP_LOGE(TAG, "❌ VL53L0X not found (got 0x%02X)", id);
+    return false;
+}
+
+static esp_err_t vl53l0x_init(void)
+{
+    ESP_LOGI(TAG, "🔧 VL53L0X Pololu full init...");
     
-    // Step 4: Clear interrupt by writing 0x01 to status register
-    vl53l0x_write_byte(0x13, 0x01);
+    // Verify model ID
+    if (vl53l0x_read_reg(IDENTIFICATION_MODEL_ID) != 0xEE) {
+        ESP_LOGE(TAG, "Model ID mismatch");
+        return ESP_FAIL;
+    }
     
-    // Step 5: Return distance in mm
-    return distance_mm;
+    // === VL53L0X_DataInit() ===
+    
+    // Set I/O to 2V8 mode
+    vl53l0x_write_reg(VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV,
+                      vl53l0x_read_reg(VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV) | 0x01);
+    
+    // Set I2C standard mode
+    vl53l0x_write_reg(0x88, 0x00);
+    vl53l0x_write_reg(0x80, 0x01);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x00, 0x00);
+    vl53l0x_stop_variable = vl53l0x_read_reg(0x91);  // Critical: device-specific value
+    vl53l0x_write_reg(0x00, 0x01);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x80, 0x00);
+    
+    // Disable SIGNAL_RATE_MSRC and SIGNAL_RATE_PRE_RANGE limit checks
+    vl53l0x_write_reg(MSRC_CONFIG_CONTROL, vl53l0x_read_reg(MSRC_CONFIG_CONTROL) | 0x12);
+    
+    // Set signal rate limit to 0.25 MCPS (Q9.7 format)
+    vl53l0x_write_reg16(FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT, (uint16_t)(0.25 * (1 << 7)));
+    
+    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0xFF);
+    
+    ESP_LOGI(TAG, "   DataInit done, stop_variable=0x%02X", vl53l0x_stop_variable);
+    
+    // === VL53L0X_StaticInit() ===
+    
+    // Get SPAD info
+    uint8_t spad_count;
+    bool spad_type_is_aperture;
+    if (!vl53l0x_get_spad_info(&spad_count, &spad_type_is_aperture)) {
+        ESP_LOGE(TAG, "getSpadInfo failed");
+        return ESP_FAIL;
+    }
+    ESP_LOGI(TAG, "   SPAD: count=%d, aperture=%d", spad_count, spad_type_is_aperture);
+    
+    // Read reference SPAD map
+    uint8_t ref_spad_map[6];
+    vl53l0x_read_multi(GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
+    
+    // Set reference SPADs
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(DYNAMIC_SPAD_REF_EN_START_OFFSET, 0x00);
+    vl53l0x_write_reg(DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD, 0x2C);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(GLOBAL_CONFIG_REF_EN_START_SELECT, 0xB4);
+    
+    uint8_t first_spad_to_enable = spad_type_is_aperture ? 12 : 0;
+    uint8_t spads_enabled = 0;
+    for (uint8_t i = 0; i < 48; i++) {
+        if (i < first_spad_to_enable || spads_enabled == spad_count) {
+            ref_spad_map[i / 8] &= ~(1 << (i % 8));
+        } else if ((ref_spad_map[i / 8] >> (i % 8)) & 0x1) {
+            spads_enabled++;
+        }
+    }
+    vl53l0x_write_multi(GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
+    
+    ESP_LOGI(TAG, "   SPAD calibration done (%d enabled)", spads_enabled);
+    
+    // === Load Tuning Settings (from vl53l0x_tuning.h) ===
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x00, 0x00);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x09, 0x00);
+    vl53l0x_write_reg(0x10, 0x00);
+    vl53l0x_write_reg(0x11, 0x00);
+    vl53l0x_write_reg(0x24, 0x01);
+    vl53l0x_write_reg(0x25, 0xFF);
+    vl53l0x_write_reg(0x75, 0x00);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x4E, 0x2C);
+    vl53l0x_write_reg(0x48, 0x00);
+    vl53l0x_write_reg(0x30, 0x20);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x30, 0x09);
+    vl53l0x_write_reg(0x54, 0x00);
+    vl53l0x_write_reg(0x31, 0x04);
+    vl53l0x_write_reg(0x32, 0x03);
+    vl53l0x_write_reg(0x40, 0x83);
+    vl53l0x_write_reg(0x46, 0x25);
+    vl53l0x_write_reg(0x60, 0x00);
+    vl53l0x_write_reg(0x27, 0x00);
+    vl53l0x_write_reg(0x50, 0x06);
+    vl53l0x_write_reg(0x51, 0x00);
+    vl53l0x_write_reg(0x52, 0x96);
+    vl53l0x_write_reg(0x56, 0x08);
+    vl53l0x_write_reg(0x57, 0x30);
+    vl53l0x_write_reg(0x61, 0x00);
+    vl53l0x_write_reg(0x62, 0x00);
+    vl53l0x_write_reg(0x64, 0x00);
+    vl53l0x_write_reg(0x65, 0x00);
+    vl53l0x_write_reg(0x66, 0xA0);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x22, 0x32);
+    vl53l0x_write_reg(0x47, 0x14);
+    vl53l0x_write_reg(0x49, 0xFF);
+    vl53l0x_write_reg(0x4A, 0x00);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x7A, 0x0A);
+    vl53l0x_write_reg(0x7B, 0x00);
+    vl53l0x_write_reg(0x78, 0x21);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x23, 0x34);
+    vl53l0x_write_reg(0x42, 0x00);
+    vl53l0x_write_reg(0x44, 0xFF);
+    vl53l0x_write_reg(0x45, 0x26);
+    vl53l0x_write_reg(0x46, 0x05);
+    vl53l0x_write_reg(0x40, 0x40);
+    vl53l0x_write_reg(0x0E, 0x06);
+    vl53l0x_write_reg(0x20, 0x1A);
+    vl53l0x_write_reg(0x43, 0x40);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x34, 0x03);
+    vl53l0x_write_reg(0x35, 0x44);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x31, 0x04);
+    vl53l0x_write_reg(0x4B, 0x09);
+    vl53l0x_write_reg(0x4C, 0x05);
+    vl53l0x_write_reg(0x4D, 0x04);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x44, 0x00);
+    vl53l0x_write_reg(0x45, 0x20);
+    vl53l0x_write_reg(0x47, 0x08);
+    vl53l0x_write_reg(0x48, 0x28);
+    vl53l0x_write_reg(0x67, 0x00);
+    vl53l0x_write_reg(0x70, 0x04);
+    vl53l0x_write_reg(0x71, 0x01);
+    vl53l0x_write_reg(0x72, 0xFE);
+    vl53l0x_write_reg(0x76, 0x00);
+    vl53l0x_write_reg(0x77, 0x00);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x0D, 0x01);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x80, 0x01);
+    vl53l0x_write_reg(0x01, 0xF8);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x8E, 0x01);
+    vl53l0x_write_reg(0x00, 0x01);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x80, 0x00);
+    
+    ESP_LOGI(TAG, "   Tuning settings loaded");
+    
+    // Set interrupt config to new sample ready
+    vl53l0x_write_reg(SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04);
+    vl53l0x_write_reg(GPIO_HV_MUX_ACTIVE_HIGH,
+                      vl53l0x_read_reg(GPIO_HV_MUX_ACTIVE_HIGH) & ~0x10);
+    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x01);
+    
+    // Disable MSRC and TCC by default
+    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0xE8);
+    
+    // === VL53L0X_PerformRefCalibration() ===
+    
+    // VHV calibration
+    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0x01);
+    if (!vl53l0x_perform_single_ref_calibration(0x40)) {
+        ESP_LOGE(TAG, "VHV calibration failed");
+        return ESP_FAIL;
+    }
+    
+    // Phase calibration
+    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0x02);
+    if (!vl53l0x_perform_single_ref_calibration(0x00)) {
+        ESP_LOGE(TAG, "Phase calibration failed");
+        return ESP_FAIL;
+    }
+    
+    // Restore sequence config
+    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0xE8);
+    
+    ESP_LOGI(TAG, "✅ VL53L0X Pololu init complete (SPAD + Tuning + RefCal)");
+    return ESP_OK;
+}
+
+// --- Pololu: readRangeSingleMillimeters() ---
+
+static uint16_t vl53l0x_read_single_mm(void)
+{
+    // Pololu single-shot measurement sequence using stop_variable
+    vl53l0x_write_reg(0x80, 0x01);
+    vl53l0x_write_reg(0xFF, 0x01);
+    vl53l0x_write_reg(0x00, 0x00);
+    vl53l0x_write_reg(0x91, vl53l0x_stop_variable);
+    vl53l0x_write_reg(0x00, 0x01);
+    vl53l0x_write_reg(0xFF, 0x00);
+    vl53l0x_write_reg(0x80, 0x00);
+    
+    // Trigger single-shot measurement
+    vl53l0x_write_reg(SYSRANGE_START, 0x01);
+    
+    // Wait for start bit to clear
+    uint32_t start = esp_timer_get_time() / 1000;
+    while (vl53l0x_read_reg(SYSRANGE_START) & 0x01) {
+        if ((esp_timer_get_time() / 1000 - start) > 500) return 65535;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    
+    // Wait for result interrupt
+    start = esp_timer_get_time() / 1000;
+    while ((vl53l0x_read_reg(RESULT_INTERRUPT_STATUS) & 0x07) == 0) {
+        if ((esp_timer_get_time() / 1000 - start) > 500) return 65535;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    
+    // Read range from RESULT_RANGE_STATUS + 10 (register 0x1E)
+    uint16_t range = vl53l0x_read_reg16(RESULT_RANGE_STATUS + 10);
+    
+    // Clear interrupt
+    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x01);
+    
+    return range;
 }
 
 /**
@@ -1155,35 +1357,21 @@ static void sensor_task(void *pvParameters)
         uint16_t distance_mm = 0;
         
         if (sensor_available) {
-            // Read from REAL sensor
-            distance_mm = vl53l0x_read_distance_mm_sync();
+            // Read from REAL sensor (Pololu single-shot)
+            distance_mm = vl53l0x_read_single_mm();
             
-            // Validate sensor reading (should be 30-4000mm typical range)
-            // LOG EVERY ATTEMPT to debug why it's failing
-            static uint32_t read_attempt = 0;
-            read_attempt++;
-            
-            if ((read_attempt % 20) == 0) {  // Log every 20 attempts
-                ESP_LOGD(TAG, "Sensor read attempt #%d: got %d mm", read_attempt, distance_mm);
-            }
-            
-            if (distance_mm == 0 || distance_mm > 4000) {
+            // 65535 = timeout, 0 = invalid
+            if (distance_mm == 65535 || distance_mm == 0 || distance_mm > 4000) {
                 static uint32_t fail_count = 0;
                 fail_count++;
                 if ((fail_count % 10) == 0) {
                     ESP_LOGW(TAG, "❌ Invalid reading: %d mm (%d fails)", distance_mm, fail_count);
                 }
-                
-                // Try again once
-                distance_mm = vl53l0x_read_distance_mm_sync();
-                if (distance_mm == 0 || distance_mm > 4000) {
-                    // Still bad - use fallback with visual indicator
-                    if (distance_samples[0] > 0) {
-                        distance_mm = distance_samples[(sample_idx + 4) % 5];
-                    } else {
-                        // This shows as "150cm" on website = sensor not working
-                        distance_mm = 1500;
-                    }
+                // Use last good value from filter buffer
+                if (distance_samples[0] > 0) {
+                    distance_mm = distance_samples[(sample_idx + 4) % 5];
+                } else {
+                    distance_mm = 1500;  // Fallback
                 }
             }
         } else {
