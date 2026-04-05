@@ -375,6 +375,32 @@ static void persist_runtime_counters(void)
     nvs_commit(sys_state.nvs_handle);
 }
 
+static void trigger_emergency_stop(const char *reason)
+{
+    bool was_active = sys_state.emergency_stop_active;
+
+    sys_state.emergency_stop_active = true;
+    if (reason != NULL) {
+        strncpy(sys_state.emergency_stop_reason, reason, sizeof(sys_state.emergency_stop_reason) - 1);
+        sys_state.emergency_stop_reason[sizeof(sys_state.emergency_stop_reason) - 1] = '\0';
+    }
+
+    if (!was_active) {
+        sys_state.emergency_trigger_count++;
+    }
+
+    nvs_set_u32(sys_state.nvs_handle, "emergency_stop_active", 1);
+    persist_runtime_counters();
+}
+
+static void reset_emergency_stop(void)
+{
+    sys_state.emergency_stop_active = false;
+    strcpy(sys_state.emergency_stop_reason, "");
+    nvs_set_u32(sys_state.nvs_handle, "emergency_stop_active", 0);
+    nvs_commit(sys_state.nvs_handle);
+}
+
 static void finalize_valve_session(uint64_t now_ms, uint64_t *valve_open_start_ms)
 {
     if (valve_open_start_ms == NULL || *valve_open_start_ms == 0) {
@@ -641,19 +667,13 @@ static esp_err_t emergency_stop_handler(httpd_req_t *req)
     if (do_reset) {
         if (sys_state.emergency_stop_active) {
             ESP_LOGI(TAG, "♻️  EMERGENCY STOP RESET - system resuming normal operations");
-            sys_state.emergency_stop_active = false;
-            strcpy(sys_state.emergency_stop_reason, "");
-            nvs_set_u32(sys_state.nvs_handle, "emergency_stop_active", 0);
-            nvs_commit(sys_state.nvs_handle);
+            reset_emergency_stop();
         } else {
             ESP_LOGI(TAG, "Reset requested while no emergency stop was active");
         }
     } else {
         ESP_LOGW(TAG, "🚨 EMERGENCY STOP TRIGGERED - all operations halted!");
-        sys_state.emergency_stop_active = true;
-        sys_state.emergency_trigger_count++;
-        nvs_set_u32(sys_state.nvs_handle, "emergency_stop_active", 1);
-        persist_runtime_counters();
+        trigger_emergency_stop("Emergency activated via API");
     }
     
     // Always close valve when emergency button is pressed
@@ -1636,10 +1656,7 @@ static void sensor_task(void *pvParameters)
     } else {
         ESP_LOGE(TAG, "⚠️  VL53L0X sensor NOT DETECTED - EMERGENCY STOP");
         xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-        sys_state.emergency_stop_active = true;
-        strcpy(sys_state.emergency_stop_reason, "VL53L0X sensor not detected");
-        nvs_set_u32(sys_state.nvs_handle, "emergency_stop_active", 1);
-        nvs_commit(sys_state.nvs_handle);
+        trigger_emergency_stop("VL53L0X sensor not detected");
         xSemaphoreGive(sys_state_mutex);
     }
     
@@ -1679,11 +1696,8 @@ static void sensor_task(void *pvParameters)
             if (distance_mm > 3000) {  // 30cm = 300mm, but allow some margin
                 xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
                 if (!sys_state.emergency_stop_active) {
-                    sys_state.emergency_stop_active = true;
-                    strcpy(sys_state.emergency_stop_reason, "Sensor reading too high (>30cm), possible sensor failure");
+                    trigger_emergency_stop("Sensor reading too high (>30cm), possible sensor failure");
                     ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", sys_state.emergency_stop_reason);
-                    nvs_set_u32(sys_state.nvs_handle, "emergency_stop_active", 1);
-                    nvs_commit(sys_state.nvs_handle);
                 }
                 xSemaphoreGive(sys_state_mutex);
             }
@@ -1780,6 +1794,15 @@ static void valve_task(void *pvParameters)
             sys_state.manual_fill_active = false;
         }
 
+        if (filling && !sys_state.valve_state) {
+            finalize_valve_session(esp_timer_get_time() / 1000, &valve_open_start_ms);
+            filling = false;
+            manual_mode = false;
+            last_progress_time_ms = 0;
+            progress_reference_distance = 0;
+            ESP_LOGI(TAG, "🚰 Valve CLOSED - session finalized after external stop");
+        }
+
         if (filling && manual_mode && !sys_state.manual_fill_active) {
             gpio_set_level(GPIO_VALVE_CONTROL, 0);
             sys_state.valve_state = false;
@@ -1858,16 +1881,13 @@ static void valve_task(void *pvParameters)
                 gpio_set_level(GPIO_VALVE_CONTROL, 0);
                 sys_state.valve_state = false;
                 sys_state.manual_fill_active = false;
-                sys_state.emergency_stop_active = true;
-                strcpy(sys_state.emergency_stop_reason, "No fill progress: distance did not decrease sufficiently within timeout");
+                trigger_emergency_stop("No fill progress: distance did not decrease sufficiently within timeout");
                 finalize_valve_session(now_ms, &valve_open_start_ms);
                 filling = false;
                 manual_mode = false;
                 last_progress_time_ms = 0;
                 progress_reference_distance = 0;
                 ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", sys_state.emergency_stop_reason);
-                nvs_set_u32(sys_state.nvs_handle, "emergency_stop_active", 1);
-                nvs_commit(sys_state.nvs_handle);
                 last_tank_state = current_tank_state;
                 vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
                 continue;
