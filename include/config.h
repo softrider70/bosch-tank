@@ -46,9 +46,9 @@
 #define TANK_THRESHOLD_BOTTOM_DEFAULT   50      // Abstand wenn Tank LEER (UNTEN-Grenzwert, cm)
 
 // Sensor-Messzyklus
-#define SENSOR_READ_INTERVAL_MS         500     // 500ms = 2 Messungen/Sekunde
-#define SENSOR_SAMPLES                  5       // Durchschnittswert über 5 Messungen
-#define TASK_SENSOR_INTERVAL_MS         500     // Task delay für sensor_task
+#define SENSOR_READ_INTERVAL_MS         250     // 250ms = 4 Messungen/Sekunde
+#define SENSOR_SAMPLES                  3       // Schnellere Mittelung fuer schnelleren Sicherheitsstopp
+#define TASK_SENSOR_INTERVAL_MS         250     // Task delay für sensor_task
 
 // ============================================================================
 // Valve Control Configuration (Solenoid, via MOSFET)
@@ -57,7 +57,7 @@
 // Magnetventil-Timeout beim Befüllen
 #define VALVE_TIMEOUT_MAX_DEFAULT       60000   // 60 Sekunden max. Befüllung
 #define VALVE_TIMEOUT_CHECK_MS          1000    // Alle 1s prüfen
-#define TASK_VALVE_CHECK_MS             1000    // Task delay für valve_task
+#define TASK_VALVE_CHECK_MS             200     // Schnelle Reaktion fuer Sicherheitsabschaltung
 
 // Füllfortschritt: Während geöffnetem Ventil muss der Sensorabstand kleiner werden
 #define FILL_PROGRESS_MIN_DELTA_CM      1       // Mindestens 1 cm Verringerung
@@ -132,7 +132,7 @@
 
 #define SERVER_PORT                     80              // HTTP port (bind to 0.0.0.0:80)
 #define SERVER_STACK_SIZE               8192            // Increased for stability
-#define SERVER_TASK_PRIORITY            5               // FreeRTOS priority
+#define SERVER_TASK_PRIORITY            9               // FreeRTOS priority
 #define MAX_OPEN_SOCKETS                4               // Concurrent connections (max 4, 3 internal for HTTP server)
 #define SERVER_KEEP_ALIVE_TIMEOUT      0               // Disable keep-alive timeout for AP stability
 #define SERVER_KEEP_ALIVE_INTERVAL     0               // Disable keep-alive for AP connections
@@ -150,10 +150,19 @@
 
 // Task Priorities (0-24, higher = more urgent)
 #define TASK_PRIO_WATCHDOG              24      // Highest: Watchdog
-#define TASK_PRIO_SENSOR                20      // High: Sensor reading
-#define TASK_PRIO_VALVE                 20      // High: Valve control
-#define TASK_PRIO_SERVER                10      // Medium: HTTP server
-#define TASK_PRIO_MAIN                  5       // Low: Main task
+#define TASK_PRIO_SENSOR                21      // High: Sensor reading
+#define TASK_PRIO_VALVE                 22      // Higher: Valve control closes first
+#define TASK_PRIO_SERVER                9       // Medium: HTTP server/UI
+#define TASK_PRIO_WIFI                  7       // Lower: WiFi monitor + DNS
+#define TASK_PRIO_MAIN                  5       // Low: Background work
+
+#if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
+#define TASK_CORE_NETWORK               0       // WiFi, HTTP and DNS stay on network core
+#define TASK_CORE_SAFETY                1       // Sensor + valve isolated on control core
+#else
+#define TASK_CORE_NETWORK               0
+#define TASK_CORE_SAFETY                0
+#endif
 
 // Task Stack Sizes (bytes)
 #define TASK_STACK_SENSOR               4096

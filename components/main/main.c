@@ -993,24 +993,31 @@ static esp_err_t index_handler(httpd_req_t *req)
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>DELONGI TANK</title>
 <style>
-body{font-family:Arial,sans-serif;background:#667eea;margin:0;padding:15px}
-.container{max-width:480px;margin:0 auto;background:white;padding:15px;border-radius:10px;box-shadow:0 4px 8px rgba(0,0,0,0.2)}
-h1{color:#333;margin:0;font-size:20px}
-.tabs{display:flex;gap:5px;margin:15px 0;border-bottom:2px solid #ddd}
-.tab-btn{flex:1;padding:10px;border:none;background:#f0f0f0;cursor:pointer;font-weight:bold;border-radius:4px 4px 0 0}
-.tab-btn.active{background:#667eea;color:white}
-.tab-content{display:none;padding:15px 0}
+body{font-family:Arial,sans-serif;background:linear-gradient(180deg,#5d76df 0%,#7ea7ff 100%);margin:0;padding:10px}
+.container{max-width:460px;margin:0 auto;background:white;padding:12px;border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,0.18)}
+h1{color:#1f2937;margin:0;font-size:19px}
+.tabs{display:flex;gap:5px;margin:12px 0;border-bottom:2px solid #e5e7eb}
+.tab-btn{flex:1;padding:9px 8px;border:none;background:#eef2f7;cursor:pointer;font-weight:bold;border-radius:8px 8px 0 0}
+.tab-btn.active{background:#3056d3;color:white}
+.tab-content{display:none;padding:10px 0 0 0}
 .tab-content.active{display:block}
-.tank{text-align:center;padding:15px;background:#e3f2fd;border-radius:8px;margin:10px 0}
-.big-num{font-size:42px;font-weight:bold;color:#0066cc}
+.dashboard-hero{display:grid;grid-template-columns:minmax(150px,1.1fr) minmax(0,1fr);gap:10px;margin:8px 0 10px 0}
+.tank-panel{background:linear-gradient(180deg,#ecf5ff 0%,#dbeafe 100%);border-radius:12px;padding:12px;text-align:center;border:1px solid #bfdbfe}
+.tank-sub{font-size:12px;color:#5b6472}
+.big-num{font-size:38px;font-weight:bold;color:#0f4ab8;line-height:1}
+.percent{font-size:17px;color:#0f4ab8;margin-top:6px;font-weight:bold}
+.tank-bar{margin-top:10px;height:14px;background:#d6dae1;border-radius:999px;position:relative;overflow:hidden}
+.summary-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.stat-card{background:#f8fbff;border:1px solid #d7e6ff;border-radius:10px;padding:9px;min-height:66px}
+.stat-label{font-size:10px;color:#526071;margin-bottom:3px}
+.stat-value{font-size:18px;font-weight:bold;color:#174ea6;line-height:1.1}
+.stat-sub{font-size:10px;color:#6b7280;margin-top:2px}
 .status-row{display:flex;justify-content:space-between;padding:8px;background:#f0f0f0;margin:5px 0;border-radius:4px;font-size:12px}
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0 12px 0}
-.stat-card{background:#eef4ff;border:1px solid #c9daf8;border-radius:8px;padding:10px}
-.stat-label{font-size:11px;color:#4a5568;margin-bottom:4px}
-.stat-value{font-size:20px;font-weight:bold;color:#174ea6}
-.stat-sub{font-size:10px;color:#666;margin-top:2px}
-.buttons{display:flex;gap:8px;margin:12px 0;flex-wrap:wrap}
-button{flex:1;min-width:90px;padding:10px;border:none;border-radius:6px;font-weight:bold;cursor:pointer;font-size:12px}
+.status-pills{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin:0 0 10px 0}
+.pill{background:#f3f4f6;border-radius:999px;padding:8px 10px;font-size:11px;display:flex;justify-content:space-between;gap:8px}
+.pill b{color:#111827}
+.buttons{display:flex;gap:8px;margin:10px 0 8px 0;flex-wrap:wrap}
+button{flex:1;min-width:90px;padding:10px;border:none;border-radius:8px;font-weight:bold;cursor:pointer;font-size:12px}
 .btn-primary{background:#667eea;color:white}
 .btn-danger{background:#f44336;color:white}
 .btn-success{background:#4caf50;color:white}
@@ -1024,6 +1031,7 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 .msg{padding:10px;margin:8px 0;border-radius:4px;font-size:12px}
 .error{background:#ffebee;color:#f44336}
 .success{background:#e8f5e9;color:#4caf50}
+@media (max-width:390px){.dashboard-hero{grid-template-columns:1fr}.container{padding:10px}.big-num{font-size:34px}}
 </style></head>
 <body>
 <div class="container">
@@ -1037,27 +1045,30 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 
 <!-- DASHBOARD TAB -->
 <div class="tab-content active" id="dashboard">
-<div class="tank">
+<div class="dashboard-hero">
+<div class="tank-panel">
 <div class="big-num" id="level">--</div>
-<div style="font-size:14px;color:#666">cm Wasser</div>
-<div id="percent" style="font-size:18px;color:#0066cc;margin-top:8px">--</div>
-<div style="margin-top:8px;height:15px;background:#ddd;border-radius:4px;position:relative;overflow:hidden">
+<div class="tank-sub">cm Wasserstand</div>
+<div id="percent" class="percent">--</div>
+<div class="tank-bar">
 <div id="bar-oben" style="position:absolute;height:3px;background:#f44336;width:1%;top:30%;right:0"></div>
 <div id="bar-fill" style="height:100%;background:#4caf50;width:0%"></div>
 <div id="bar-unten" style="position:absolute;height:3px;background:#ff9800;width:1%;bottom:0;left:0"></div>
 </div>
 </div>
-
-<div class="status-row"><span>Ventil:</span><span id="valve">GESCHL</span></div>
-<div class="status-row"><span>Status:</span><span id="status">OK</span></div>
-<div class="stats-grid">
+<div class="summary-grid">
 <div class="stat-card"><div class="stat-label">Literzaehler</div><div class="stat-value" id="total-liters">--</div><div class="stat-sub">Gesamtmenge</div></div>
 <div class="stat-card"><div class="stat-label">Ventil-Ausloesungen</div><div class="stat-value" id="open-count">--</div><div class="stat-sub">Auto + manuell</div></div>
 <div class="stat-card"><div class="stat-label">Notaus-Ausloesungen</div><div class="stat-value" id="emergency-count">--</div><div class="stat-sub">Persistenter Zaehler</div></div>
 <div class="stat-card"><div class="stat-label">Oeffnungszeit</div><div class="stat-value" id="total-time">--</div><div class="stat-sub">Gesamt in Sekunden</div></div>
 </div>
-<div class="status-row"><span>WiFi:</span><span id="dash-wifi">OK</span></div>
-<div class="status-row"><span>Notaus:</span><span id="emergency-state" class="status-ok">FREI</span></div>
+</div>
+<div class="status-pills">
+<div class="pill"><span>System</span><b id="status">OK</b></div>
+<div class="pill"><span>Ventil</span><b id="valve">GESCHL</b></div>
+<div class="pill"><span>WiFi</span><b id="dash-wifi">OK</b></div>
+<div class="pill"><span>Notaus</span><b id="emergency-state" class="status-ok">FREI</b></div>
+</div>
 <div id="emergency-reason" style="display:none;padding:8px;background:#ffebee;border-radius:4px;margin:5px 0;font-size:12px;color:#c62828"></div>
 
 <div class="buttons">
@@ -1114,6 +1125,13 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <script>
 let isFilling = false;
 let isEmergencyActive = false;
+let dashboardTimer = null;
+let dashboardPollInFlight = false;
+const DASHBOARD_REFRESH_MS = 1000;
+function scheduleDashboardRefresh(delay){
+    if(dashboardTimer) clearTimeout(dashboardTimer);
+    dashboardTimer = setTimeout(() => updateDashboard(), delay);
+}
 function syncFillButton(){
     const btn = document.getElementById('fill-btn');
         if(btn){
@@ -1151,8 +1169,10 @@ function showMsg(tabId, text, isErr){
   el.style.display = 'block';
   setTimeout(() => el.style.display = 'none', 4000);
 }
-function updateDashboard(){
-  fetch('/api/status').then(r => r.json()).then(d => {
+function updateDashboard(force){
+    if(dashboardPollInFlight && !force) return;
+    dashboardPollInFlight = true;
+    fetch('/api/status').then(r => r.json()).then(d => {
     const lv = d.sensors.tank_level_cm || 0;
     const top = d.config.threshold_top_cm || 1;
     const bot = d.config.threshold_bottom_cm || 50;
@@ -1181,17 +1201,19 @@ function updateDashboard(){
     // Disable save button if emergency active
     document.getElementById('save-btn').disabled = !!d.emergency;
     document.getElementById('save-btn').style.opacity = !!d.emergency ? 0.5 : 1;
-  });
+    }).catch(() => {}).finally(() => {
+        dashboardPollInFlight = false;
+        scheduleDashboardRefresh(DASHBOARD_REFRESH_MS);
+    });
 }
-function fill(){if(isEmergencyActive){showMsg('dashboard', 'Notaus aktiv - erst RESET ausfuehren', true); return;} const nextAction = isFilling ? 'close' : 'open'; fetch('/api/valve/manual', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: nextAction})}).then(r => r.json()).then(d => {isFilling = !!d.manual_fill_active; syncFillButton(); updateDashboard(); if(d.message) showMsg('dashboard', d.message, false);}).catch(() => updateDashboard());}
-function stop(){fetch('/api/valve/stop', {method: 'POST'}).then(() => {isFilling = false; updateDashboard(); showMsg('dashboard', 'Ventil geschlossen', false);});}
-function resetEmergency(){if(!isEmergencyActive){showMsg('dashboard', 'Keine Notaus-Sperre aktiv', false); return;} fetch('/api/emergency_stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset'})}).then(r => r.json()).then(d => {updateDashboard(); document.getElementById('emergency-reason').style.display = 'none'; showMsg('dashboard', d.message || 'Reset ausgefuehrt', false);}).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
+function fill(){if(isEmergencyActive){showMsg('dashboard', 'Notaus aktiv - erst RESET ausfuehren', true); return;} const nextAction = isFilling ? 'close' : 'open'; fetch('/api/valve/manual', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: nextAction})}).then(r => r.json()).then(d => {isFilling = !!d.manual_fill_active; syncFillButton(); updateDashboard(true); if(d.message) showMsg('dashboard', d.message, false);}).catch(() => updateDashboard(true));}
+function stop(){fetch('/api/valve/stop', {method: 'POST'}).then(() => {isFilling = false; updateDashboard(true); showMsg('dashboard', 'Ventil geschlossen', false);});}
+function resetEmergency(){if(!isEmergencyActive){showMsg('dashboard', 'Keine Notaus-Sperre aktiv', false); return;} fetch('/api/emergency_stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset'})}).then(r => r.json()).then(d => {updateDashboard(true); document.getElementById('emergency-reason').style.display = 'none'; showMsg('dashboard', d.message || 'Reset ausgefuehrt', false);}).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
 function loadSettings(){fetch('/api/config').then(r => r.json()).then(d => {document.getElementById('top').value = d.config.threshold_top_cm; document.getElementById('bottom').value = d.config.threshold_bottom_cm; document.getElementById('timeout').value = d.config.timeout_max_ms; document.getElementById('fill-progress-timeout').value = d.config.fill_progress_timeout_ms; document.getElementById('flow-rate').value = d.config.flow_rate_l_per_min;});}
 function saveSettings(){const top = parseInt(document.getElementById('top').value, 10); const bottom = parseInt(document.getElementById('bottom').value, 10); const timeout = parseInt(document.getElementById('timeout').value, 10); const fillProgressTimeout = parseInt(document.getElementById('fill-progress-timeout').value, 10); const flowRate = parseFloat(document.getElementById('flow-rate').value); if(!Number.isFinite(top) || !Number.isFinite(bottom) || !Number.isFinite(timeout) || !Number.isFinite(fillProgressTimeout) || !Number.isFinite(flowRate)){showMsg('settings', 'Alle Felder muessen gueltige Zahlen enthalten', true); return;} if(top < 1 || top > 100 || bottom < 1 || bottom > 100){showMsg('settings', 'OBEN und UNTEN muessen zwischen 1 und 100 cm liegen', true); return;} if(top >= bottom){showMsg('settings', 'OBEN muss kleiner als UNTEN sein', true); return;} if(timeout < 1000 || fillProgressTimeout < 1000){showMsg('settings', 'Timeout-Werte muessen mindestens 1000 ms sein', true); return;} if(flowRate <= 0 || flowRate > 50){showMsg('settings', 'Durchfluss muss zwischen 0.1 und 50 L/min liegen', true); return;} const cfg = {threshold_top_cm: top, threshold_bottom_cm: bottom, timeout_max_ms: timeout, fill_progress_timeout_ms: fillProgressTimeout, flow_rate_l_per_min: flowRate}; fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg)}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: ' + r.status)); return r.json();}).then(() => showMsg('settings', 'Einstellungen gespeichert', false)).catch(e => showMsg('settings', 'Fehler: ' + e.message, true));}
 function loadWiFi(){fetch('/api/wifi/status').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {const c=d.wifi&&d.wifi.connected; document.getElementById('wifi-con').textContent=c?'Verbunden':'Getrennt'; document.getElementById('wifi-con').style.color=c?'#4caf50':'#f44336'; document.getElementById('wifi-ssid').textContent = (d.wifi && d.wifi.ssid) ? d.wifi.ssid : '-'; document.getElementById('wifi-rssi').textContent = (d.wifi && d.wifi.rssi) ? (d.wifi.rssi + ' dBm') : '-'; document.getElementById('wifi-ip').textContent = (d.wifi && d.wifi.ip) ? d.wifi.ip : '-';}).catch(e => {console.error('loadWiFi failed:', e); document.getElementById('wifi-con').textContent='Fehler'; showMsg('wifi', 'WiFi API Fehler', true);});}
 function connectWiFi(){const s = document.getElementById('new-ssid').value; const p = document.getElementById('new-pass').value; if(!s||!p) {showMsg('wifi', 'SSID und Pass erforderlich', true); return;} fetch('/api/wifi/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ssid: s, password: p})}).then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {showMsg('wifi', 'WiFi Update gesendet', false); document.getElementById('new-ssid').value = ''; document.getElementById('new-pass').value = ''; setTimeout(loadWiFi, 2000);}).catch(e => {console.error('connectWiFi failed:', e); showMsg('wifi', 'Fehler: '+e.message, true);});}
 function reset(){if(confirm('System wirklich neustarten?')) fetch('/api/system/reset', {method: 'POST'}).then(() => showMsg('wifi', 'Neustart...', false)).catch(e => showMsg('wifi', 'Fehler', true));}
-setInterval(updateDashboard, 1000);
 syncFillButton();
 updateDashboard();
 </script>
@@ -1662,7 +1684,7 @@ static void sensor_task(void *pvParameters)
     
     ESP_LOGI(TAG, "🚀 Sensor mode: %s", sensor_available ? "REAL HARDWARE" : "EMERGENCY (no sensor)");
     
-    uint16_t distance_samples[5] = {0};
+    uint16_t distance_samples[SENSOR_SAMPLES] = {0};
     int sample_idx = 0;
     uint32_t stable_counter = 0;
     
@@ -1686,7 +1708,7 @@ static void sensor_task(void *pvParameters)
                 }
                 // Use last good value from filter buffer
                 if (distance_samples[0] > 0) {
-                    distance_mm = distance_samples[(sample_idx + 4) % 5];
+                    distance_mm = distance_samples[(sample_idx + SENSOR_SAMPLES - 1) % SENSOR_SAMPLES];
                 } else {
                     distance_mm = 1500;  // Fallback
                 }
@@ -1709,13 +1731,13 @@ static void sensor_task(void *pvParameters)
         
         // Moving average filter (5-sample buffer for noise reduction)
         distance_samples[sample_idx] = distance_mm;
-        sample_idx = (sample_idx + 1) % 5;
+        sample_idx = (sample_idx + 1) % SENSOR_SAMPLES;
         
         uint32_t distance_sum = 0;
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < SENSOR_SAMPLES; i++) {
             distance_sum += distance_samples[i];
         }
-        uint16_t distance_filtered_mm = distance_sum / 5;
+        uint16_t distance_filtered_mm = distance_sum / SENSOR_SAMPLES;
         uint16_t distance_cm = distance_filtered_mm / 10;
         
         // Update system state
@@ -2022,10 +2044,11 @@ static httpd_handle_t start_webserver(void)
     
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = SERVER_PORT;
-    config.stack_size = SERVER_STACK_SIZE;
-    config.task_priority = SERVER_TASK_PRIORITY;
+    config.stack_size = TASK_STACK_SERVER;
+    config.task_priority = TASK_PRIO_SERVER;
     config.max_open_sockets = MAX_OPEN_SOCKETS;
     config.max_uri_handlers = 24;
+    config.core_id = TASK_CORE_NETWORK;
     
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) == ESP_OK) {
@@ -2225,27 +2248,37 @@ void app_main(void)
     // Start FreeRTOS tasks
     ESP_LOGI(TAG, "📋 Creating FreeRTOS tasks...");
     
-    xTaskCreate(
+    BaseType_t task_result = xTaskCreatePinnedToCore(
         sensor_task,
         "sensor_task",
         TASK_STACK_SENSOR,
         NULL,
         TASK_PRIO_SENSOR,
-        &sensor_task_handle
+        &sensor_task_handle,
+        TASK_CORE_SAFETY
     );
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "❌ Failed to create sensor_task");
+        return;
+    }
     esp_task_wdt_add(sensor_task_handle);  // Register with watchdog
-    ESP_LOGI(TAG, "   ✓ sensor_task (priority %d, stack %d bytes)", TASK_PRIO_SENSOR, TASK_STACK_SENSOR);
+    ESP_LOGI(TAG, "   ✓ sensor_task (priority %d, stack %d bytes, core %d)", TASK_PRIO_SENSOR, TASK_STACK_SENSOR, TASK_CORE_SAFETY);
     
-    xTaskCreate(
+    task_result = xTaskCreatePinnedToCore(
         valve_task,
         "valve_task",
         TASK_STACK_VALVE,
         NULL,
         TASK_PRIO_VALVE,
-        &valve_task_handle
+        &valve_task_handle,
+        TASK_CORE_SAFETY
     );
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "❌ Failed to create valve_task");
+        return;
+    }
     esp_task_wdt_add(valve_task_handle);  // Register with watchdog
-    ESP_LOGI(TAG, "   ✓ valve_task (priority %d, stack %d bytes)", TASK_PRIO_VALVE, TASK_STACK_VALVE);
+    ESP_LOGI(TAG, "   ✓ valve_task (priority %d, stack %d bytes, core %d)", TASK_PRIO_VALVE, TASK_STACK_VALVE, TASK_CORE_SAFETY);
     
     // ========== Initialize WiFi & HTTP BEFORE creating wifi_task ==========
     ESP_LOGI(TAG, "📡 Initializing WiFi...");
@@ -2350,19 +2383,28 @@ void app_main(void)
     }
     
     // ========== Now create wifi_task (only monitoring) ==========
-    xTaskCreate(
+    task_result = xTaskCreatePinnedToCore(
         wifi_task,
         "wifi_task",
         TASK_STACK_WIFI,
         NULL,
-        TASK_PRIO_MAIN,
-        &wifi_task_handle
+        TASK_PRIO_WIFI,
+        &wifi_task_handle,
+        TASK_CORE_NETWORK
     );
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "❌ Failed to create wifi_task");
+        return;
+    }
     // DO NOT register wifi_task with watchdog - it doesn't do critical work
-    ESP_LOGI(TAG, "   ✓ wifi_task (priority %d, stack %d bytes - monitoring only)", TASK_PRIO_MAIN, TASK_STACK_WIFI);
+    ESP_LOGI(TAG, "   ✓ wifi_task (priority %d, stack %d bytes, core %d - monitoring only)", TASK_PRIO_WIFI, TASK_STACK_WIFI, TASK_CORE_NETWORK);
     
     // Start DNS captive portal server (resolves all domains to our AP IP)
-    xTaskCreate(dns_server_task, "dns_task", 8192, NULL, TASK_PRIO_MAIN, NULL);
+    task_result = xTaskCreatePinnedToCore(dns_server_task, "dns_task", 8192, NULL, TASK_PRIO_WIFI, NULL, TASK_CORE_NETWORK);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "❌ Failed to create dns_task");
+        return;
+    }
     
     ESP_LOGI(TAG, "✅ All tasks created and running");
     ESP_LOGI(TAG, "📡 Configured thresholds:");
