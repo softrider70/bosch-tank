@@ -110,6 +110,7 @@ static system_state_t sys_state = {
 
 // Mutex for sys_state access
 static SemaphoreHandle_t sys_state_mutex = NULL;
+static SemaphoreHandle_t wifi_state_mutex = NULL;
 
 // Task Handles
 static TaskHandle_t sensor_task_handle = NULL;
@@ -335,6 +336,248 @@ static void send_json_response(httpd_req_t *req, const char *json_data)
     httpd_resp_send(req, json_data, strlen(json_data));
 }
 
+static esp_err_t receive_request_body(httpd_req_t *req, char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (req->content_len >= (int)buffer_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    int total_read = 0;
+    while (total_read < req->content_len) {
+        int read_len = httpd_req_recv(req, buffer + total_read, req->content_len - total_read);
+        if (read_len == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (read_len <= 0) {
+            return ESP_FAIL;
+        }
+        total_read += read_len;
+    }
+
+    buffer[total_read] = '\0';
+    return ESP_OK;
+}
+
+static void get_system_state_snapshot(system_state_t *snapshot)
+{
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    *snapshot = sys_state;
+    xSemaphoreGive(sys_state_mutex);
+}
+
+static void get_wifi_state_snapshot(wifi_state_t *snapshot)
+{
+    xSemaphoreTake(wifi_state_mutex, portMAX_DELAY);
+    *snapshot = wifi_state;
+    xSemaphoreGive(wifi_state_mutex);
+}
+
+static void persist_runtime_counters_locked(void)
+{
+    if (sys_state.nvs_handle == 0) {
+        return;
+    }
+
+    esp_err_t err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_VALVE_OPEN_COUNT, sys_state.valve_open_count);
+    if (err == ESP_OK) err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_COUNT, sys_state.emergency_trigger_count);
+    if (err == ESP_OK) err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_TOTAL_OPEN_TIME_MS, sys_state.total_open_time_ms);
+    if (err == ESP_OK) err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_TOTAL_LITERS_CENTI, (uint32_t)(sys_state.total_liters * 100.0f));
+    if (err == ESP_OK) err = nvs_commit(sys_state.nvs_handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to persist runtime counters: %s", esp_err_to_name(err));
+    }
+}
+
+static void persist_runtime_counters(void)
+{
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    persist_runtime_counters_locked();
+    xSemaphoreGive(sys_state_mutex);
+}
+
+static void set_manual_fill_active(bool active)
+{
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    sys_state.manual_fill_active = active;
+    xSemaphoreGive(sys_state_mutex);
+}
+
+static void set_valve_and_manual_state(bool valve_open, bool manual_fill_active)
+{
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    sys_state.valve_state = valve_open;
+    sys_state.manual_fill_active = manual_fill_active;
+    xSemaphoreGive(sys_state_mutex);
+}
+
+static void begin_valve_session(uint64_t start_time_ms, bool manual_fill_active)
+{
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    sys_state.current_valve_open_start_ms = start_time_ms;
+    sys_state.valve_open_count++;
+    sys_state.valve_state = true;
+    sys_state.manual_fill_active = manual_fill_active;
+    persist_runtime_counters_locked();
+    xSemaphoreGive(sys_state_mutex);
+}
+
+static void update_runtime_config(uint32_t top, uint32_t bottom, uint32_t timeout, uint32_t fill_progress_timeout, float flow_rate)
+{
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    sys_state.threshold_top = top;
+    sys_state.threshold_bottom = bottom;
+    sys_state.timeout_max = timeout;
+    sys_state.fill_progress_timeout_ms = fill_progress_timeout;
+    sys_state.flow_rate_l_per_min = flow_rate;
+    xSemaphoreGive(sys_state_mutex);
+}
+
+static void record_wifi_disconnect(uint8_t reason, uint32_t now_ms)
+{
+    xSemaphoreTake(wifi_state_mutex, portMAX_DELAY);
+    wifi_state.is_connected = false;
+    wifi_state.retry_count++;
+    wifi_state.last_error_code = reason;
+    wifi_state.last_attempt_tick = now_ms;
+    xSemaphoreGive(wifi_state_mutex);
+}
+
+static void mark_wifi_connected(void)
+{
+    xSemaphoreTake(wifi_state_mutex, portMAX_DELAY);
+    wifi_state.is_connected = true;
+    wifi_state.retry_count = 0;
+    wifi_state.ap_active = false;
+    xSemaphoreGive(wifi_state_mutex);
+}
+
+static void update_wifi_credentials_state(const char *ssid)
+{
+    xSemaphoreTake(wifi_state_mutex, portMAX_DELAY);
+    strncpy(wifi_state.ssid, ssid, sizeof(wifi_state.ssid) - 1);
+    wifi_state.ssid[sizeof(wifi_state.ssid) - 1] = '\0';
+    wifi_state.retry_count = 0;
+    wifi_state.last_attempt_tick = 0;
+    wifi_state.is_connected = false;
+    wifi_state.ap_active = false;
+    xSemaphoreGive(wifi_state_mutex);
+}
+
+static void set_wifi_retry_attempt_timestamp(uint32_t now_ms)
+{
+    xSemaphoreTake(wifi_state_mutex, portMAX_DELAY);
+    wifi_state.last_attempt_tick = now_ms;
+    xSemaphoreGive(wifi_state_mutex);
+}
+
+static void set_wifi_ap_active(bool active)
+{
+    xSemaphoreTake(wifi_state_mutex, portMAX_DELAY);
+    wifi_state.ap_active = active;
+    if (active) {
+        wifi_state.is_connected = false;
+    }
+    xSemaphoreGive(wifi_state_mutex);
+}
+
+static bool parse_json_int_field(const char *json, const char *key, int *value)
+{
+    const char *match = strstr(json, key);
+    if (match == NULL) {
+        return false;
+    }
+
+    const char *separator = strchr(match, ':');
+    if (separator == NULL) {
+        return false;
+    }
+
+    *value = atoi(separator + 1);
+    return true;
+}
+
+static bool parse_json_float_field(const char *json, const char *key, float *value)
+{
+    const char *match = strstr(json, key);
+    if (match == NULL) {
+        return false;
+    }
+
+    const char *separator = strchr(match, ':');
+    if (separator == NULL) {
+        return false;
+    }
+
+    *value = atof(separator + 1);
+    return true;
+}
+
+static bool parse_json_string_field(const char *json, const char *key, char *out, size_t out_size)
+{
+    const char *match = strstr(json, key);
+    if (match == NULL || out_size == 0) {
+        return false;
+    }
+
+    const char *start = strchr(match, ':');
+    if (start == NULL) {
+        return false;
+    }
+
+    start++;
+    while (*start == ' ' || *start == '\t') {
+        start++;
+    }
+
+    if (*start != '"') {
+        return false;
+    }
+
+    start++;
+
+    size_t out_index = 0;
+    while (*start != '\0') {
+        if (*start == '"') {
+            out[out_index] = '\0';
+            return true;
+        }
+
+        char current = *start;
+        if (current == '\\') {
+            start++;
+            if (*start == '\0') {
+                return false;
+            }
+
+            switch (*start) {
+                case '"': current = '"'; break;
+                case '\\': current = '\\'; break;
+                case '/': current = '/'; break;
+                case 'b': current = '\b'; break;
+                case 'f': current = '\f'; break;
+                case 'n': current = '\n'; break;
+                case 'r': current = '\r'; break;
+                case 't': current = '\t'; break;
+                default: current = *start; break;
+            }
+        }
+
+        if (out_index + 1 >= out_size) {
+            return false;
+        }
+
+        out[out_index++] = current;
+        start++;
+    }
+
+    return true;
+}
+
 static int calculate_fill_percent(uint16_t sensor_distance_cm, uint32_t threshold_top, uint32_t threshold_bottom)
 {
     if (threshold_bottom <= threshold_top) {
@@ -351,7 +594,7 @@ static int calculate_fill_percent(uint16_t sensor_distance_cm, uint32_t threshol
 
     uint32_t range = threshold_bottom - threshold_top;
     uint32_t current = sensor_distance_cm - threshold_top;
-    int percent = (int)(((float)(range - current) / (float)range) * 100.0f);
+    int percent = (int)(((range - current) * 100U) / range);
 
     if (percent < 0) {
         return 0;
@@ -364,21 +607,9 @@ static int calculate_fill_percent(uint16_t sensor_distance_cm, uint32_t threshol
     return percent;
 }
 
-static void persist_runtime_counters(void)
-{
-    if (sys_state.nvs_handle == 0) {
-        return;
-    }
-
-    nvs_set_u32(sys_state.nvs_handle, NVS_KEY_VALVE_OPEN_COUNT, sys_state.valve_open_count);
-    nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_COUNT, sys_state.emergency_trigger_count);
-    nvs_set_u32(sys_state.nvs_handle, NVS_KEY_TOTAL_OPEN_TIME_MS, sys_state.total_open_time_ms);
-    nvs_set_u32(sys_state.nvs_handle, NVS_KEY_TOTAL_LITERS_CENTI, (uint32_t)(sys_state.total_liters * 100.0f));
-    nvs_commit(sys_state.nvs_handle);
-}
-
 static void trigger_emergency_stop(const char *reason)
 {
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
     bool was_active = sys_state.emergency_stop_active;
 
     sys_state.emergency_stop_active = true;
@@ -392,15 +623,18 @@ static void trigger_emergency_stop(const char *reason)
     }
 
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 1);
-    persist_runtime_counters();
+    persist_runtime_counters_locked();
+    xSemaphoreGive(sys_state_mutex);
 }
 
 static void reset_emergency_stop(void)
 {
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
     sys_state.emergency_stop_active = false;
     strcpy(sys_state.emergency_stop_reason, "");
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 0);
     nvs_commit(sys_state.nvs_handle);
+    xSemaphoreGive(sys_state_mutex);
 }
 
 static void finalize_active_valve_session(uint64_t now_ms)
@@ -415,7 +649,7 @@ static void finalize_active_valve_session(uint64_t now_ms)
     sys_state.total_open_time_ms += (uint32_t)open_time_ms;
     sys_state.total_liters += ((float)open_time_ms / 60000.0f) * sys_state.flow_rate_l_per_min;
     sys_state.current_valve_open_start_ms = 0;
-    persist_runtime_counters();
+    persist_runtime_counters_locked();
     xSemaphoreGive(sys_state_mutex);
 }
 
@@ -427,9 +661,19 @@ static esp_err_t status_handler(httpd_req_t *req)
     char json_response[1024];
     int free_mem = esp_get_free_heap_size();
     system_state_t state_snapshot;
+    wifi_state_t wifi_snapshot;
+    long long now_seconds = (long long)(esp_timer_get_time() / 1000000);
+    long long uptime_ms = (long long)(esp_timer_get_time() / 1000);
 
-    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-    state_snapshot = sys_state;
+    get_system_state_snapshot(&state_snapshot);
+    get_wifi_state_snapshot(&wifi_snapshot);
+
+    int fill_percent = calculate_fill_percent(
+        state_snapshot.sensor_distance_cm,
+        state_snapshot.threshold_top,
+        state_snapshot.threshold_bottom
+    );
+
     snprintf(json_response, sizeof(json_response),
         "{"
         "\"status\":\"%s\","
@@ -468,10 +712,10 @@ static esp_err_t status_handler(httpd_req_t *req)
         state_snapshot.emergency_stop_active ? "EMERGENCY_STOP" : "OK",
         state_snapshot.emergency_stop_active ? "true" : "false",
         state_snapshot.emergency_stop_reason,
-        (long long)(esp_timer_get_time() / 1000000),
+        now_seconds,
         state_snapshot.sensor_distance_cm,
-        calculate_fill_percent(state_snapshot.sensor_distance_cm, state_snapshot.threshold_top, state_snapshot.threshold_bottom),
-        calculate_fill_percent(state_snapshot.sensor_distance_cm, state_snapshot.threshold_top, state_snapshot.threshold_bottom),
+        fill_percent,
+        state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top ? 1 : 0,
         (unsigned long)state_snapshot.threshold_top,
         (unsigned long)state_snapshot.threshold_bottom,
         (unsigned long)state_snapshot.timeout_max,
@@ -485,12 +729,11 @@ static esp_err_t status_handler(httpd_req_t *req)
         (unsigned long long)state_snapshot.total_open_time_ms,
         state_snapshot.total_liters,
         free_mem,
-        (long long)esp_timer_get_time() / 1000,
-        wifi_state.is_connected ? "true" : "false",
+        uptime_ms,
+        wifi_snapshot.is_connected ? "true" : "false",
         VERSION_STRING,
         API_VERSION
     );
-    xSemaphoreGive(sys_state_mutex);
     
     send_json_response(req, json_response);
     return ESP_OK;
@@ -504,8 +747,8 @@ static esp_err_t config_get_handler(httpd_req_t *req)
     char json_response[512];
     system_state_t state_snapshot;
     
-    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-    state_snapshot = sys_state;
+    get_system_state_snapshot(&state_snapshot);
+
     snprintf(json_response, sizeof(json_response),
         "{"
         "\"config\":{"
@@ -522,7 +765,6 @@ static esp_err_t config_get_handler(httpd_req_t *req)
         (unsigned int)state_snapshot.fill_progress_timeout_ms,
         state_snapshot.flow_rate_l_per_min
     );
-    xSemaphoreGive(sys_state_mutex);
     
     send_json_response(req, json_response);
     return ESP_OK;
@@ -534,9 +776,9 @@ static esp_err_t config_get_handler(httpd_req_t *req)
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
     char buf[256] = {0};
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    
-    if (ret <= 0) {
+    esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
+
+    if (recv_err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request");
         return ESP_FAIL;
     }
@@ -544,30 +786,14 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     // Simple JSON parsing for thresholds
     int top = -1, bottom = -1, timeout = -1, fill_progress_timeout = -1;
     float flow_rate = -1.0f;
+    bool has_top = parse_json_int_field(buf, "\"threshold_top_cm\"", &top);
+    bool has_bottom = parse_json_int_field(buf, "\"threshold_bottom_cm\"", &bottom);
+    bool has_timeout = parse_json_int_field(buf, "\"timeout_max_ms\"", &timeout);
+    bool has_fill_progress_timeout = parse_json_int_field(buf, "\"fill_progress_timeout_ms\"", &fill_progress_timeout);
+    bool has_flow_rate = parse_json_float_field(buf, "\"flow_rate_l_per_min\"", &flow_rate);
     
-    // Parse JSON manually
-    char *ptr = buf;
-    while (*ptr) {
-        if (strstr(ptr, "\"threshold_top_cm\":")) {
-            ptr = strstr(ptr, ":") + 1;
-            top = atoi(ptr);
-        } else if (strstr(ptr, "\"threshold_bottom_cm\":")) {
-            ptr = strstr(ptr, ":") + 1;
-            bottom = atoi(ptr);
-        } else if (strstr(ptr, "\"timeout_max_ms\":")) {
-            ptr = strstr(ptr, ":") + 1;
-            timeout = atoi(ptr);
-        } else if (strstr(ptr, "\"fill_progress_timeout_ms\":")) {
-            ptr = strstr(ptr, ":") + 1;
-            fill_progress_timeout = atoi(ptr);
-        } else if (strstr(ptr, "\"flow_rate_l_per_min\":")) {
-            ptr = strstr(ptr, ":") + 1;
-            flow_rate = atof(ptr);
-        }
-        ptr++;
-    }
-    
-    if (top >= 0 && bottom >= 0 && timeout >= 0 && fill_progress_timeout >= 0 && flow_rate >= 0.0f) {
+    if (has_top && has_bottom && has_timeout && has_fill_progress_timeout && has_flow_rate &&
+        top >= 0 && bottom >= 0 && timeout >= 0 && fill_progress_timeout >= 0 && flow_rate >= 0.0f) {
 
         if (top > 0 && bottom > top && timeout >= 1000 && fill_progress_timeout >= 1000 && flow_rate > 0.0f) {
             esp_err_t nvs_err = ESP_OK;
@@ -584,13 +810,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
                 return ESP_FAIL;
             }
 
-            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-            sys_state.threshold_top = top;
-            sys_state.threshold_bottom = bottom;
-            sys_state.timeout_max = timeout;
-            sys_state.fill_progress_timeout_ms = fill_progress_timeout;
-            sys_state.flow_rate_l_per_min = flow_rate;
-            xSemaphoreGive(sys_state_mutex);
+            update_runtime_config(top, bottom, timeout, fill_progress_timeout, flow_rate);
             
             char response[256];
             snprintf(response, sizeof(response),
@@ -610,9 +830,10 @@ static esp_err_t config_post_handler(httpd_req_t *req)
 static esp_err_t valve_manual_handler(httpd_req_t *req)
 {
     char buf[128] = {0};
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
-    
-    if (ret <= 0) {
+    system_state_t state_snapshot;
+    esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
+
+    if (recv_err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request");
         return ESP_FAIL;
     }
@@ -623,15 +844,17 @@ static esp_err_t valve_manual_handler(httpd_req_t *req)
     } else if (strstr(buf, "\"action\":\"close\"")) {
         action = 0;
     }
+
+    get_system_state_snapshot(&state_snapshot);
     
     if (action >= 0) {
-        if (action == 1 && sys_state.emergency_stop_active) {
+        if (action == 1 && state_snapshot.emergency_stop_active) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Emergency stop active");
             return ESP_FAIL;
         }
 
-        if (action == 1 && sys_state.sensor_distance_cm <= sys_state.threshold_top) {
-            sys_state.manual_fill_active = false;
+        if (action == 1 && state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top) {
+            set_manual_fill_active(false);
 
             char response[256];
             snprintf(response, sizeof(response),
@@ -641,7 +864,7 @@ static esp_err_t valve_manual_handler(httpd_req_t *req)
             return ESP_OK;
         }
 
-        sys_state.manual_fill_active = (action == 1);
+        set_manual_fill_active(action == 1);
         ESP_LOGI(TAG, "Manual fill %s requested", action ? "START" : "STOP");
         
         char response[256];
@@ -664,15 +887,18 @@ static esp_err_t valve_manual_handler(httpd_req_t *req)
 static esp_err_t emergency_stop_handler(httpd_req_t *req)
 {
     char buf[64] = {0};
-    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
+    system_state_t state_snapshot;
     bool do_reset = true;
 
-    if (ret > 0 && strstr(buf, "\"action\":\"trigger\"")) {
+    if (recv_err == ESP_OK && strstr(buf, "\"action\":\"trigger\"")) {
         do_reset = false;
     }
 
+    get_system_state_snapshot(&state_snapshot);
+
     if (do_reset) {
-        if (sys_state.emergency_stop_active) {
+        if (state_snapshot.emergency_stop_active) {
             ESP_LOGI(TAG, "♻️  EMERGENCY STOP RESET - system resuming normal operations");
             reset_emergency_stop();
         } else {
@@ -684,17 +910,17 @@ static esp_err_t emergency_stop_handler(httpd_req_t *req)
     }
     
     // Always close valve when emergency button is pressed
-    sys_state.manual_fill_active = false;
     gpio_set_level(GPIO_VALVE_CONTROL, 0);
-    sys_state.valve_state = false;
+    set_valve_and_manual_state(false, false);
     finalize_active_valve_session(esp_timer_get_time() / 1000);
+    get_system_state_snapshot(&state_snapshot);
     
     char response[256];
     snprintf(response, sizeof(response),
         "{\"status\":\"%s\",\"emergency\":%s,\"message\":\"%s\",\"valve\":\"CLOSED\"}",
-        sys_state.emergency_stop_active ? "EMERGENCY" : "OK",
-        sys_state.emergency_stop_active ? "true" : "false",
-        sys_state.emergency_stop_active ? "Emergency activated" : "Emergency reset"
+        state_snapshot.emergency_stop_active ? "EMERGENCY" : "OK",
+        state_snapshot.emergency_stop_active ? "true" : "false",
+        state_snapshot.emergency_stop_active ? "Emergency activated" : "Emergency reset"
     );
     send_json_response(req, response);
     
@@ -706,9 +932,8 @@ static esp_err_t emergency_stop_handler(httpd_req_t *req)
  */
 static esp_err_t valve_stop_handler(httpd_req_t *req)
 {
-    sys_state.manual_fill_active = false;
-    sys_state.valve_state = false;  // Close valve
     gpio_set_level(GPIO_VALVE_CONTROL, 0);
+    set_valve_and_manual_state(false, false);
     finalize_active_valve_session(esp_timer_get_time() / 1000);
     
     char response[128];
@@ -724,9 +949,8 @@ static esp_err_t valve_stop_handler(httpd_req_t *req)
  */
 static esp_err_t system_reset_handler(httpd_req_t *req)
 {
-    sys_state.manual_fill_active = false;
-    sys_state.valve_state = false;
     gpio_set_level(GPIO_VALVE_CONTROL, 0);
+    set_valve_and_manual_state(false, false);
     finalize_active_valve_session(esp_timer_get_time() / 1000);
     persist_runtime_counters();
 
@@ -751,8 +975,10 @@ static esp_err_t wifi_status_handler(httpd_req_t *req)
     // Get current WiFi mode and status
     wifi_ap_record_t ap_info;
     char response[512];
+    wifi_state_t wifi_snapshot;
     
     esp_err_t err = esp_wifi_sta_get_ap_info(&ap_info);
+    get_wifi_state_snapshot(&wifi_snapshot);
     
     // Get local IP if connected
     char ip_str[16] = "Not connected";
@@ -773,7 +999,7 @@ static esp_err_t wifi_status_handler(httpd_req_t *req)
         "\"ip\":\"%s\"}}", 
         (err == ESP_OK) ? (char*)ap_info.ssid : "Not connected",
         (err == ESP_OK) ? ap_info.rssi : 0,
-        (err == ESP_OK) ? "true" : "false",
+        wifi_snapshot.is_connected ? "true" : "false",
         ip_str
     );
     send_json_response(req, response);
@@ -794,46 +1020,21 @@ static esp_err_t wifi_config_handler(httpd_req_t *req)
     
     // Read POST body
     char buffer[1024] = {0};
-    int ret = httpd_req_recv(req, buffer, content_len);
-    if (ret <= 0) {
+    esp_err_t recv_err = receive_request_body(req, buffer, sizeof(buffer));
+    if (recv_err != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read body");
         return ESP_FAIL;
     }
-    buffer[ret] = '\0';
     
     // Extract SSID and Password using simple string parsing
     // Format: {"ssid":"xxxx","password":"yyyy"}
     char ssid[32] = {0};
     char password[64] = {0};
-    
-    // Parse SSID
-    const char *ssid_start = strstr(buffer, "\"ssid\":\"");
-    if (ssid_start) {
-        ssid_start += 8;  // Skip '"ssid":"'
-        const char *ssid_end = strchr(ssid_start, '"');
-        if (ssid_end) {
-            int ssid_len = ssid_end - ssid_start;
-            if (ssid_len < 32) {
-                strncpy(ssid, ssid_start, ssid_len);
-            }
-        }
-    }
-    
-    // Parse Password
-    const char *pass_start = strstr(buffer, "\"password\":\"");
-    if (pass_start) {
-        pass_start += 12;  // Skip '"password":"'
-        const char *pass_end = strchr(pass_start, '"');
-        if (pass_end) {
-            int pass_len = pass_end - pass_start;
-            if (pass_len < 64) {
-                strncpy(password, pass_start, pass_len);
-            }
-        }
-    }
+    bool has_ssid = parse_json_string_field(buffer, "\"ssid\"", ssid, sizeof(ssid));
+    bool has_password = parse_json_string_field(buffer, "\"password\"", password, sizeof(password));
     
     // Validate input
-    if (strlen(ssid) == 0 || strlen(password) == 0) {
+    if (!has_ssid || !has_password || strlen(ssid) == 0 || strlen(password) == 0) {
         char response[100];
         snprintf(response, sizeof(response),
             "{\"status\":\"ERROR\",\"message\":\"SSID and password required\"}"
@@ -857,11 +1058,19 @@ static esp_err_t wifi_config_handler(httpd_req_t *req)
     }
     
     // Commit changes
-    nvs_commit(sys_state.nvs_handle);
+    esp_err_t ret_commit = nvs_commit(sys_state.nvs_handle);
+    if (ret_commit != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to commit WiFi credentials: %s", esp_err_to_name(ret_commit));
+        char response[100];
+        snprintf(response, sizeof(response),
+            "{\"status\":\"ERROR\",\"message\":\"Failed to commit credentials\"}"
+        );
+        send_json_response(req, response);
+        return ESP_OK;
+    }
     
     // Update in-memory state
-    strncpy(wifi_state.ssid, ssid, sizeof(wifi_state.ssid) - 1);
-    wifi_state.retry_count = 0;  // Reset retry counter
+    update_wifi_credentials_state(ssid);
     
     // Apply new WiFi credentials immediately
     wifi_config_t sta_config = {0};
@@ -872,9 +1081,11 @@ static esp_err_t wifi_config_handler(httpd_req_t *req)
     esp_wifi_set_config(WIFI_IF_STA, &sta_config);
     
     // If was in AP-only fallback, ensure APSTA mode for reconnect
-    if (wifi_state.ap_active) {
+    wifi_state_t wifi_snapshot;
+    get_wifi_state_snapshot(&wifi_snapshot);
+    if (wifi_snapshot.ap_active) {
         ESP_LOGI(TAG, "Resetting retry count, attempting STA reconnect");
-        wifi_state.ap_active = false;
+        set_wifi_ap_active(false);
     }
     
     // Disconnect any existing STA connection, then reconnect
@@ -910,16 +1121,8 @@ static esp_err_t captive_redirect_handler(httpd_req_t *req)
  */
 static void dns_server_task(void *pvParameters)
 {
-    uint8_t *rx_buf = malloc(512);
-    uint8_t *tx_buf = malloc(512);
-
-    if (rx_buf == NULL || tx_buf == NULL) {
-        ESP_LOGE(TAG, "DNS: Failed to allocate buffers");
-        free(rx_buf);
-        free(tx_buf);
-        vTaskDelete(NULL);
-        return;
-    }
+    uint8_t rx_buf[512];
+    uint8_t tx_buf[512];
 
     struct sockaddr_in server_addr = {
         .sin_family = AF_INET,
@@ -930,8 +1133,6 @@ static void dns_server_task(void *pvParameters)
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(TAG, "DNS: Failed to create socket");
-        free(rx_buf);
-        free(tx_buf);
         vTaskDelete(NULL);
         return;
     }
@@ -939,8 +1140,6 @@ static void dns_server_task(void *pvParameters)
     if (bind(sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         ESP_LOGE(TAG, "DNS: Failed to bind port 53");
         close(sock);
-        free(rx_buf);
-        free(tx_buf);
         vTaskDelete(NULL);
         return;
     }
@@ -1702,6 +1901,8 @@ static void sensor_task(void *pvParameters)
     
     uint16_t distance_samples[SENSOR_SAMPLES] = {0};
     int sample_idx = 0;
+    uint32_t distance_sum = 0;
+    uint32_t sample_count = 0;
     uint32_t stable_counter = 0;
     
     while (1) {
@@ -1732,12 +1933,13 @@ static void sensor_task(void *pvParameters)
             
             // Check if distance > 30cm (300mm), emergency stop
             if (distance_mm > 3000) {  // 30cm = 300mm, but allow some margin
-                xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-                if (!sys_state.emergency_stop_active) {
+                system_state_t state_snapshot;
+                get_system_state_snapshot(&state_snapshot);
+                if (!state_snapshot.emergency_stop_active) {
                     trigger_emergency_stop("Sensor reading too high (>30cm), possible sensor failure");
-                    ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", sys_state.emergency_stop_reason);
+                    get_system_state_snapshot(&state_snapshot);
+                    ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", state_snapshot.emergency_stop_reason);
                 }
-                xSemaphoreGive(sys_state_mutex);
             }
         } else {
             // No sensor - emergency already triggered
@@ -1746,14 +1948,16 @@ static void sensor_task(void *pvParameters)
         }
         
         // Moving average filter (5-sample buffer for noise reduction)
+        distance_sum -= distance_samples[sample_idx];
         distance_samples[sample_idx] = distance_mm;
+        distance_sum += distance_mm;
         sample_idx = (sample_idx + 1) % SENSOR_SAMPLES;
-        
-        uint32_t distance_sum = 0;
-        for (int i = 0; i < SENSOR_SAMPLES; i++) {
-            distance_sum += distance_samples[i];
+
+        if (sample_count < SENSOR_SAMPLES) {
+            sample_count++;
         }
-        uint16_t distance_filtered_mm = distance_sum / SENSOR_SAMPLES;
+
+        uint16_t distance_filtered_mm = (uint16_t)(distance_sum / sample_count);
         uint16_t distance_cm = distance_filtered_mm / 10;
         
         // Update system state
@@ -1815,23 +2019,26 @@ static void valve_task(void *pvParameters)
     while (1) {
         // Feed watchdog - CRITICAL for safety
         esp_task_wdt_reset();
+        system_state_t state_snapshot;
+        get_system_state_snapshot(&state_snapshot);
         
         int current_tank_state = 0;
         
         // Determine tank state based on sensor readings
-        if (sys_state.sensor_distance_cm <= sys_state.threshold_top) {
+        if (state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top) {
             current_tank_state = 1;  // FULL
-        } else if (sys_state.sensor_distance_cm >= sys_state.threshold_bottom) {
+        } else if (state_snapshot.sensor_distance_cm >= state_snapshot.threshold_bottom) {
             current_tank_state = 3;  // EMPTY
         } else {
             current_tank_state = 2;  // FILLING
         }
 
-        if (sys_state.manual_fill_active && current_tank_state == 1) {
-            sys_state.manual_fill_active = false;
+        if (state_snapshot.manual_fill_active && current_tank_state == 1) {
+            set_manual_fill_active(false);
+            state_snapshot.manual_fill_active = false;
         }
 
-        if (filling && !sys_state.valve_state) {
+        if (filling && !state_snapshot.valve_state) {
             finalize_active_valve_session(esp_timer_get_time() / 1000);
             filling = false;
             manual_mode = false;
@@ -1840,9 +2047,9 @@ static void valve_task(void *pvParameters)
             ESP_LOGI(TAG, "🚰 Valve CLOSED - session finalized after external stop");
         }
 
-        if (filling && manual_mode && !sys_state.manual_fill_active) {
+        if (filling && manual_mode && !state_snapshot.manual_fill_active) {
             gpio_set_level(GPIO_VALVE_CONTROL, 0);
-            sys_state.valve_state = false;
+            set_valve_and_manual_state(false, false);
             finalize_active_valve_session(esp_timer_get_time() / 1000);
             filling = false;
             manual_mode = false;
@@ -1851,19 +2058,14 @@ static void valve_task(void *pvParameters)
             ESP_LOGI(TAG, "🚰 Valve CLOSED - manual fill stopped");
         }
 
-        if (sys_state.manual_fill_active && !filling && !sys_state.emergency_stop_active && current_tank_state != 1) {
+        if (state_snapshot.manual_fill_active && !filling && !state_snapshot.emergency_stop_active && current_tank_state != 1) {
             gpio_set_level(GPIO_VALVE_CONTROL, 1);
-            sys_state.valve_state = true;
             filling = true;
             manual_mode = true;
             fill_start_time_ms = esp_timer_get_time() / 1000;
             last_progress_time_ms = fill_start_time_ms;
-            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-            sys_state.current_valve_open_start_ms = fill_start_time_ms;
-            sys_state.valve_open_count++;
-            persist_runtime_counters();
-            xSemaphoreGive(sys_state_mutex);
-            progress_reference_distance = sys_state.sensor_distance_cm;
+            begin_valve_session(fill_start_time_ms, true);
+            progress_reference_distance = state_snapshot.sensor_distance_cm;
             ESP_LOGI(TAG, "🚰 Valve OPENED - manual fill requested");
         }
         
@@ -1873,8 +2075,7 @@ static void valve_task(void *pvParameters)
                 case 1:  // Tank FULL
                     if (filling) {
                         gpio_set_level(GPIO_VALVE_CONTROL, 0);  // Close valve
-                        sys_state.valve_state = false;
-                        sys_state.manual_fill_active = false;
+                        set_valve_and_manual_state(false, false);
                         finalize_active_valve_session(esp_timer_get_time() / 1000);
                         filling = false;
                         manual_mode = false;
@@ -1890,34 +2091,28 @@ static void valve_task(void *pvParameters)
             last_tank_state = current_tank_state;
         }
 
-        if (current_tank_state == 3 && !filling && !sys_state.emergency_stop_active && !sys_state.manual_fill_active) {
+        if (current_tank_state == 3 && !filling && !state_snapshot.emergency_stop_active && !state_snapshot.manual_fill_active) {
             gpio_set_level(GPIO_VALVE_CONTROL, 1);  // Open valve
-            sys_state.valve_state = true;
             filling = true;
             manual_mode = false;
             fill_start_time_ms = esp_timer_get_time() / 1000;
             last_progress_time_ms = fill_start_time_ms;
-            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-            sys_state.current_valve_open_start_ms = fill_start_time_ms;
-            sys_state.valve_open_count++;
-            persist_runtime_counters();
-            xSemaphoreGive(sys_state_mutex);
-            progress_reference_distance = sys_state.sensor_distance_cm;
+            begin_valve_session(fill_start_time_ms, false);
+            progress_reference_distance = state_snapshot.sensor_distance_cm;
             ESP_LOGI(TAG, "🚰 Valve OPENED - Tank is EMPTY (below UNTEN threshold) - FILLING STARTED");
         }
         
         // Timeout protection: if filling exceeds max timeout
         if (filling) {
             uint64_t now_ms = esp_timer_get_time() / 1000;
-            uint16_t current_distance = sys_state.sensor_distance_cm;
+            uint16_t current_distance = state_snapshot.sensor_distance_cm;
 
             if (current_distance + FILL_PROGRESS_MIN_DELTA_CM <= progress_reference_distance) {
                 progress_reference_distance = current_distance;
                 last_progress_time_ms = now_ms;
-            } else if (!manual_mode && (now_ms - last_progress_time_ms) > sys_state.fill_progress_timeout_ms) {
+            } else if (!manual_mode && (now_ms - last_progress_time_ms) > state_snapshot.fill_progress_timeout_ms) {
                 gpio_set_level(GPIO_VALVE_CONTROL, 0);
-                sys_state.valve_state = false;
-                sys_state.manual_fill_active = false;
+                set_valve_and_manual_state(false, false);
                 trigger_emergency_stop("No fill progress: distance did not decrease sufficiently within timeout");
                 finalize_active_valve_session(now_ms);
                 filling = false;
@@ -1931,26 +2126,26 @@ static void valve_task(void *pvParameters)
             }
 
             uint64_t elapsed_ms = now_ms - fill_start_time_ms;
-            if (elapsed_ms > sys_state.timeout_max) {
+            if (elapsed_ms > state_snapshot.timeout_max) {
                 gpio_set_level(GPIO_VALVE_CONTROL, 0);  // Close valve
-                sys_state.valve_state = false;
-                sys_state.manual_fill_active = false;
+                set_valve_and_manual_state(false, false);
                 finalize_active_valve_session(now_ms);
                 filling = false;
                 manual_mode = false;
                 last_progress_time_ms = 0;
                 progress_reference_distance = 0;
                 ESP_LOGW(TAG, "⚠️  TIMEOUT! Valve CLOSED - fill time exceeded %d ms", 
-                        sys_state.timeout_max);
+                        state_snapshot.timeout_max);
                 // Note: Not calling emergency stop, just safety closure
             }
         }
         
         // LED feedback: ON while opening, OFF when closed
-        if (sys_state.emergency_stop_active) {
+        get_system_state_snapshot(&state_snapshot);
+        if (state_snapshot.emergency_stop_active) {
             gpio_set_level(GPIO_LED_STATUS, 1);  // Red alert
         } else {
-            gpio_set_level(GPIO_LED_STATUS, sys_state.valve_state ? 1 : 0);
+            gpio_set_level(GPIO_LED_STATUS, state_snapshot.valve_state ? 1 : 0);
         }
         
         vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
@@ -1975,10 +2170,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         wifi_event_sta_disconnected_t *event = (wifi_event_sta_disconnected_t *)event_data;
         uint8_t reason = event->reason;
         ESP_LOGW(TAG, "WiFi disconnected (reason: %d)", reason);
-        
-        wifi_state.retry_count++;
-        wifi_state.last_error_code = reason;
-        wifi_state.last_attempt_tick = esp_timer_get_time() / 1000;  // Record timestamp
+        record_wifi_disconnect(reason, (uint32_t)(esp_timer_get_time() / 1000));
         
         // Don't retry here - let wifi_task handle retry logic
         // This prevents blocking the event loop
@@ -1987,10 +2179,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "✅ WiFi STA connected!");
         ESP_LOGI(TAG, "   IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        
-        wifi_state.is_connected = true;
-        wifi_state.retry_count = 0;  // Reset retry counter
-        wifi_state.ap_active = false;
+
+        mark_wifi_connected();
     }
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
         ESP_LOGI(TAG, "Device connected to AP");
@@ -2014,35 +2204,37 @@ static void wifi_task(void *pvParameters)
     
     while (1) {
         uint32_t now = esp_timer_get_time() / 1000;
+        wifi_state_t wifi_snapshot;
+        get_wifi_state_snapshot(&wifi_snapshot);
         
         // If already connected, just monitor
-        if (wifi_state.is_connected) {
+        if (wifi_snapshot.is_connected) {
             vTaskDelay(pdMS_TO_TICKS(5000));  // Check every 5 seconds
             continue;
         }
         
         // Not connected - check if we should retry or switch to AP mode
-        if (wifi_state.ap_active) {
+        if (wifi_snapshot.ap_active) {
             // Already in AP mode - wait for user to configure WiFi
             vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
         
         // In STA mode but not connected
-        if (wifi_state.retry_count < 3) {
+        if (wifi_snapshot.retry_count < 3) {
             // Check if 3 seconds have passed since last attempt
-            uint32_t time_since_attempt = now - wifi_state.last_attempt_tick;
+            uint32_t time_since_attempt = now - wifi_snapshot.last_attempt_tick;
             
-            if (time_since_attempt >= 3000 || wifi_state.last_attempt_tick == 0) {
+            if (time_since_attempt >= 3000 || wifi_snapshot.last_attempt_tick == 0) {
                 // Time to retry (or first attempt)
-                wifi_state.last_attempt_tick = now;
-                ESP_LOGI(TAG, "🔄 WiFi connect attempt %d/3...", wifi_state.retry_count + 1);
+                set_wifi_retry_attempt_timestamp(now);
+                ESP_LOGI(TAG, "🔄 WiFi connect attempt %d/3...", wifi_snapshot.retry_count + 1);
                 esp_wifi_connect();
             }
         } else {
             // Max retries reached - AP is already running in APSTA mode
             ESP_LOGE(TAG, "❌ WiFi STA failed after 3 attempts - AP still active @ " AP_MODE_IP_ADDR);
-            wifi_state.ap_active = true;
+            set_wifi_ap_active(true);
             // Stop retrying, user can enter credentials via AP
         }
         
@@ -2228,6 +2420,11 @@ void app_main(void)
         ESP_LOGE(TAG, "❌ Failed to create sys_state mutex!");
         return;
     }
+    wifi_state_mutex = xSemaphoreCreateMutex();
+    if (wifi_state_mutex == NULL) {
+        ESP_LOGE(TAG, "❌ Failed to create wifi_state mutex!");
+        return;
+    }
     ESP_LOGI(TAG, "   ✓ sys_state mutex created");
     
     ESP_LOGI(TAG, "   → Testing I2C init...");
@@ -2346,7 +2543,7 @@ void app_main(void)
     const char *use_ssid = (ret_ssid == ESP_OK && ssid_len > 0) ? nvs_ssid : "ESP";
     const char *use_pass = (ret_pass == ESP_OK && pass_len > 0) ? nvs_pass : "11111111";
     
-    strncpy(wifi_state.ssid, use_ssid, sizeof(wifi_state.ssid) - 1);
+    update_wifi_credentials_state(use_ssid);
     
     ESP_LOGI(TAG, "📶 WiFi credentials - SSID: %s (from %s)", 
              use_ssid, (ret_ssid == ESP_OK) ? "NVS" : "default");
