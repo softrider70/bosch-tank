@@ -31,7 +31,7 @@
 
 // Hardware
 #include "driver/gpio.h"
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 // WiFi & Network
 #include "esp_wifi.h"
@@ -64,6 +64,7 @@
 static const char *TAG = "delongi-tank-main";
 
 #define API_VERSION "1.0"
+#define I2C_DEVICE_SCL_WAIT_US 20000
 
 // ============================================================================
 // Global State
@@ -116,6 +117,9 @@ static SemaphoreHandle_t wifi_state_mutex = NULL;
 static TaskHandle_t sensor_task_handle = NULL;
 static TaskHandle_t valve_task_handle = NULL;
 static TaskHandle_t wifi_task_handle = NULL;
+
+static i2c_master_bus_handle_t i2c_bus_handle = NULL;
+static i2c_master_dev_handle_t vl53l0x_dev_handle = NULL;
 
 // WiFi State Variables
 typedef struct {
@@ -241,30 +245,42 @@ static esp_err_t init_nvs(void)
 static esp_err_t init_i2c(void)
 {
     ESP_LOGI(TAG, "Initializing I2C bus (ESP-IDF v6.0)...");
-    
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
+
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = I2C_MASTER_PORT,
         .sda_io_num = GPIO_I2C_SDA,
         .scl_io_num = GPIO_I2C_SCL,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = I2C_MASTER_FREQ_HZ,
-        .clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags.enable_internal_pullup = true,
+        .flags.allow_pd = false,
     };
-    
-    esp_err_t ret = i2c_param_config(I2C_MASTER_PORT, &conf);
+
+    esp_err_t ret = i2c_new_master_bus(&bus_config, &i2c_bus_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2C param config failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "I2C master bus init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    i2c_device_config_t dev_config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = VL53L0X_ADDR,
+        .scl_speed_hz = I2C_MASTER_FREQ_HZ,
+        .scl_wait_us = I2C_DEVICE_SCL_WAIT_US,
+        .flags.disable_ack_check = false,
+    };
+
+    ret = i2c_master_bus_add_device(i2c_bus_handle, &dev_config, &vl53l0x_dev_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "VL53L0X device registration failed: %s", esp_err_to_name(ret));
+        i2c_del_master_bus(i2c_bus_handle);
+        i2c_bus_handle = NULL;
         return ret;
     }
     
-    ret = i2c_driver_install(I2C_MASTER_PORT, conf.mode, 0, 0, 0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2C driver install failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "✅ I2C initialized on SDA=%d, SCL=%d", GPIO_I2C_SDA, GPIO_I2C_SCL);
+    ESP_LOGI(TAG, "✅ I2C initialized on SDA=%d, SCL=%d, scl_wait_us=%d", GPIO_I2C_SDA, GPIO_I2C_SCL, I2C_DEVICE_SCL_WAIT_US);
     return ESP_OK;
 }
 
@@ -1492,25 +1508,45 @@ updateDashboard();
 // Module-level state
 static uint8_t vl53l0x_stop_variable = 0;
 
+#define I2C_TRANSFER_TIMEOUT_MS 1000
+#define I2C_SCAN_TIMEOUT_MS 200
+static esp_err_t vl53l0x_i2c_write(const uint8_t *data, size_t len)
+{
+    esp_err_t ret = i2c_master_transmit(vl53l0x_dev_handle, data, len, I2C_TRANSFER_TIMEOUT_MS);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "VL53L0X I2C write failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+static esp_err_t vl53l0x_i2c_write_read(const uint8_t *write_data, size_t write_len, uint8_t *read_data, size_t read_len)
+{
+    esp_err_t ret = i2c_master_transmit_receive(vl53l0x_dev_handle, write_data, write_len, read_data, read_len, I2C_TRANSFER_TIMEOUT_MS);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "VL53L0X I2C write/read failed: %s", esp_err_to_name(ret));
+    }
+    return ret;
+}
+
 // --- I2C Low-Level Helpers ---
 
 static esp_err_t vl53l0x_write_reg(uint8_t reg, uint8_t value)
 {
     uint8_t data[2] = {reg, value};
-    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, data, 2, 100);
+    return vl53l0x_i2c_write(data, sizeof(data));
 }
 
 static esp_err_t vl53l0x_write_reg16(uint8_t reg, uint16_t value)
 {
     uint8_t data[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
-    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, data, 3, 100);
+    return vl53l0x_i2c_write(data, sizeof(data));
 }
 
 static esp_err_t __attribute__((unused)) vl53l0x_write_reg32(uint8_t reg, uint32_t value)
 {
     uint8_t data[5] = {reg, (uint8_t)(value >> 24), (uint8_t)(value >> 16),
                        (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
-    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, data, 5, 100);
+    return vl53l0x_i2c_write(data, sizeof(data));
 }
 
 static esp_err_t vl53l0x_write_multi(uint8_t reg, const uint8_t *src, uint8_t count)
@@ -1518,26 +1554,30 @@ static esp_err_t vl53l0x_write_multi(uint8_t reg, const uint8_t *src, uint8_t co
     uint8_t buf[count + 1];
     buf[0] = reg;
     memcpy(&buf[1], src, count);
-    return i2c_master_write_to_device(I2C_MASTER_PORT, VL53L0X_ADDR, buf, count + 1, 100);
+    return vl53l0x_i2c_write(buf, count + 1);
 }
 
 static uint8_t vl53l0x_read_reg(uint8_t reg)
 {
     uint8_t value = 0;
-    i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR, &reg, 1, &value, 1, 100);
+    if (vl53l0x_i2c_write_read(&reg, 1, &value, 1) != ESP_OK) {
+        return 0;
+    }
     return value;
 }
 
 static uint16_t vl53l0x_read_reg16(uint8_t reg)
 {
     uint8_t data[2] = {0};
-    i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR, &reg, 1, data, 2, 100);
+    if (vl53l0x_i2c_write_read(&reg, 1, data, 2) != ESP_OK) {
+        return 0;
+    }
     return ((uint16_t)data[0] << 8) | data[1];
 }
 
 static esp_err_t vl53l0x_read_multi(uint8_t reg, uint8_t *dst, uint8_t count)
 {
-    return i2c_master_write_read_device(I2C_MASTER_PORT, VL53L0X_ADDR, &reg, 1, dst, count, 100);
+    return vl53l0x_i2c_write_read(&reg, 1, dst, count);
 }
 
 // --- I2C Bus Scan (optimized) ---
@@ -1547,8 +1587,7 @@ static void i2c_scan_bus(void)
     ESP_LOGI(TAG, "🔍 I2C bus scan (0x03-0x77)...");
     int found = 0;
     for (uint8_t addr = 0x03; addr < 0x78; addr++) {
-        uint8_t reg = 0;
-        esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_PORT, addr, &reg, 1, 20);
+        esp_err_t ret = i2c_master_probe(i2c_bus_handle, addr, I2C_SCAN_TIMEOUT_MS);
         if (ret == ESP_OK) {
             const char *name = (addr == 0x29) ? " (VL53L0X)" :
                                (addr == 0x52) ? " (EEPROM)" :
