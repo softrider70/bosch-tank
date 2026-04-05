@@ -9,6 +9,8 @@ idf_component_register(
         esp_driver_touch_sens
         esp_wifi
         esp_http_server
+        esp_https_ota
+        app_update
         mbedtls
         esp_timer
     WHOLE_ARCHIVE

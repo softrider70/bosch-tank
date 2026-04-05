@@ -45,6 +45,8 @@
 
 // Web Server
 #include "esp_http_server.h"
+#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
 
 // Network utilities
 // #include "mdns.h"  // TODO: Add mdns to CMakeLists.txt REQUIRES
@@ -127,6 +129,7 @@ static system_state_t sys_state = {
 // Mutex for sys_state access
 static SemaphoreHandle_t sys_state_mutex = NULL;
 static SemaphoreHandle_t wifi_state_mutex = NULL;
+static SemaphoreHandle_t ota_state_mutex = NULL;
 
 // Task Handles
 static TaskHandle_t sensor_task_handle = NULL;
@@ -135,6 +138,7 @@ static TaskHandle_t wifi_task_handle = NULL;
 static TaskHandle_t touch_task_handle = NULL;
 static TaskHandle_t dns_task_handle = NULL;
 static TaskHandle_t stack_monitor_task_handle = NULL;
+static TaskHandle_t ota_task_handle = NULL;
 static volatile bool dns_server_stop_requested = false;
 static volatile bool sensor_reinit_requested = false;
 
@@ -166,9 +170,36 @@ static wifi_state_t wifi_state = {
     .last_attempt_tick = 0
 };
 
+typedef struct {
+    bool in_progress;
+    bool last_result_ok;
+    char phase[24];
+    char message[128];
+    char last_error[64];
+    char current_version[32];
+    char target_version[32];
+    char url[192];
+    uint64_t last_start_ms;
+    uint64_t last_end_ms;
+} ota_state_t;
+
+static ota_state_t ota_state = {
+    .in_progress = false,
+    .last_result_ok = false,
+    .phase = "IDLE",
+    .message = "Kein OTA gestartet",
+    .last_error = "",
+    .current_version = "",
+    .target_version = "",
+    .url = "",
+    .last_start_ms = 0,
+    .last_end_ms = 0,
+};
+
 static void get_system_state_snapshot(system_state_t *snapshot);
 static void set_manual_fill_active(bool active);
 static esp_err_t request_manual_fill(bool enable, const char *source, bool *manual_fill_active_out, const char **message_out);
+static void ota_update_task(void *pvParameters);
 
 // ============================================================================
 // Phase 1: NVS (Non-Volatile Storage) Initialization
@@ -598,6 +629,17 @@ static void get_wifi_state_snapshot(wifi_state_t *snapshot)
     xSemaphoreTake(wifi_state_mutex, portMAX_DELAY);
     *snapshot = wifi_state;
     xSemaphoreGive(wifi_state_mutex);
+}
+
+static void get_ota_state_snapshot(ota_state_t *snapshot)
+{
+    if (snapshot == NULL || ota_state_mutex == NULL) {
+        return;
+    }
+
+    xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+    *snapshot = ota_state;
+    xSemaphoreGive(ota_state_mutex);
 }
 
 static void collect_cpu_runtime_stats(uint32_t *core0_percent,
@@ -1527,6 +1569,136 @@ static esp_err_t warnings_reset_handler(httpd_req_t *req)
 }
 
 /**
+ * @brief Handler: GET /api/ota/status - OTA runtime status
+ */
+static esp_err_t ota_status_handler(httpd_req_t *req)
+{
+    ota_state_t snapshot;
+    char escaped_phase[(sizeof(snapshot.phase) * 2) + 1] = {0};
+    char escaped_message[(sizeof(snapshot.message) * 2) + 1] = {0};
+    char escaped_error[(sizeof(snapshot.last_error) * 2) + 1] = {0};
+    char escaped_current_version[(sizeof(snapshot.current_version) * 2) + 1] = {0};
+    char escaped_target_version[(sizeof(snapshot.target_version) * 2) + 1] = {0};
+    char response[768];
+
+    get_ota_state_snapshot(&snapshot);
+    json_escape_string(snapshot.phase, escaped_phase, sizeof(escaped_phase));
+    json_escape_string(snapshot.message, escaped_message, sizeof(escaped_message));
+    json_escape_string(snapshot.last_error, escaped_error, sizeof(escaped_error));
+    json_escape_string(snapshot.current_version, escaped_current_version, sizeof(escaped_current_version));
+    json_escape_string(snapshot.target_version, escaped_target_version, sizeof(escaped_target_version));
+
+    snprintf(response, sizeof(response),
+        "{\"status\":\"%s\",\"ota\":{"
+        "\"in_progress\":%s,"
+        "\"last_result_ok\":%s,"
+        "\"phase\":\"%s\","
+        "\"message\":\"%s\","
+        "\"last_error\":\"%s\","
+        "\"current_version\":\"%s\","
+        "\"target_version\":\"%s\","
+        "\"last_start_ms\":%llu,"
+        "\"last_end_ms\":%llu"
+        "}}",
+        snapshot.in_progress ? "BUSY" : "OK",
+        snapshot.in_progress ? "true" : "false",
+        snapshot.last_result_ok ? "true" : "false",
+        escaped_phase,
+        escaped_message,
+        escaped_error,
+        escaped_current_version,
+        escaped_target_version,
+        (unsigned long long)snapshot.last_start_ms,
+        (unsigned long long)snapshot.last_end_ms);
+
+    send_json_response(req, response);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler: POST /api/ota/start - Start OTA from HTTPS URL
+ */
+static esp_err_t ota_start_handler(httpd_req_t *req)
+{
+    char body[320] = {0};
+    char url[192] = {0};
+    ota_state_t snapshot;
+
+    esp_err_t recv_err = receive_request_body(req, body, sizeof(body));
+    if (recv_err != ESP_OK) {
+        send_json_response(req,
+            "{\"status\":\"ERROR\",\"message\":\"Ungueltiger Request\"}");
+        return ESP_OK;
+    }
+
+    if (!parse_json_string_field(body, "\"url\"", url, sizeof(url)) || strlen(url) < 12) {
+        send_json_response(req,
+            "{\"status\":\"ERROR\",\"message\":\"URL fehlt\"}");
+        return ESP_OK;
+    }
+
+    if (strncmp(url, "https://", 8) != 0) {
+        send_json_response(req,
+            "{\"status\":\"ERROR\",\"message\":\"Nur HTTPS OTA erlaubt\"}");
+        return ESP_OK;
+    }
+
+    get_ota_state_snapshot(&snapshot);
+    if (snapshot.in_progress || ota_task_handle != NULL) {
+        send_json_response(req,
+            "{\"status\":\"ERROR\",\"message\":\"OTA bereits aktiv\"}");
+        return ESP_OK;
+    }
+
+    char *task_url = strdup(url);
+    if (task_url == NULL) {
+        send_json_response(req,
+            "{\"status\":\"ERROR\",\"message\":\"Kein Speicher fuer OTA\"}");
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+    ota_state.in_progress = true;
+    ota_state.last_result_ok = false;
+    strncpy(ota_state.phase, "STARTING", sizeof(ota_state.phase) - 1);
+    strncpy(ota_state.message, "OTA wird gestartet", sizeof(ota_state.message) - 1);
+    ota_state.last_error[0] = '\0';
+    strncpy(ota_state.current_version, APP_FULL_VERSION, sizeof(ota_state.current_version) - 1);
+    ota_state.target_version[0] = '\0';
+    strncpy(ota_state.url, url, sizeof(ota_state.url) - 1);
+    ota_state.last_start_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    xSemaphoreGive(ota_state_mutex);
+
+    BaseType_t created = xTaskCreatePinnedToCore(
+        ota_update_task,
+        "ota_task",
+        TASK_STACK_SERVER,
+        task_url,
+        TASK_PRIO_MAIN,
+        &ota_task_handle,
+        TASK_CORE_NETWORK);
+
+    if (created != pdPASS) {
+        free(task_url);
+        xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+        ota_state.in_progress = false;
+        strncpy(ota_state.phase, "FAILED", sizeof(ota_state.phase) - 1);
+        strncpy(ota_state.message, "OTA Task konnte nicht gestartet werden", sizeof(ota_state.message) - 1);
+        strncpy(ota_state.last_error, "task-create-failed", sizeof(ota_state.last_error) - 1);
+        ota_state.last_end_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        xSemaphoreGive(ota_state_mutex);
+
+        send_json_response(req,
+            "{\"status\":\"ERROR\",\"message\":\"OTA Task konnte nicht gestartet werden\"}");
+        return ESP_OK;
+    }
+
+    send_json_response(req,
+        "{\"status\":\"OK\",\"message\":\"OTA gestartet\"}");
+    return ESP_OK;
+}
+
+/**
  * @brief Handler: POST /api/sensor/reset - Request VL53L0X reinitialization
  */
 static esp_err_t sensor_reset_handler(httpd_req_t *req)
@@ -1558,6 +1730,90 @@ static esp_err_t system_reset_handler(httpd_req_t *req)
     // Restart after response sent
     esp_restart();
     return ESP_OK;
+}
+
+static void ota_update_task(void *pvParameters)
+{
+    char *url = (char *)pvParameters;
+    esp_err_t err = ESP_FAIL;
+    esp_https_ota_handle_t ota_handle = NULL;
+    bool ota_begun = false;
+    bool ota_aborted = false;
+
+    xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+    strncpy(ota_state.phase, "DOWNLOADING", sizeof(ota_state.phase) - 1);
+    strncpy(ota_state.message, "Firmware wird geladen", sizeof(ota_state.message) - 1);
+    xSemaphoreGive(ota_state_mutex);
+
+    esp_http_client_config_t http_cfg = {
+        .url = url,
+        .timeout_ms = 20000,
+        .keep_alive_enable = true,
+    };
+
+    esp_https_ota_config_t ota_cfg = {
+        .http_config = &http_cfg,
+    };
+
+    err = esp_https_ota_begin(&ota_cfg, &ota_handle);
+    if (err == ESP_OK) {
+        ota_begun = true;
+        esp_app_desc_t app_desc;
+        if (esp_https_ota_get_img_desc(ota_handle, &app_desc) == ESP_OK) {
+            xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+            strncpy(ota_state.target_version, app_desc.version, sizeof(ota_state.target_version) - 1);
+            xSemaphoreGive(ota_state_mutex);
+        }
+
+        while ((err = esp_https_ota_perform(ota_handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+
+        if (err == ESP_OK && esp_https_ota_is_complete_data_received(ota_handle)) {
+            err = esp_https_ota_finish(ota_handle);
+        } else {
+            if (err == ESP_OK) {
+                err = ESP_FAIL;
+            }
+            esp_https_ota_abort(ota_handle);
+            ota_aborted = true;
+        }
+    }
+
+    if (err == ESP_OK) {
+        xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+        ota_state.in_progress = false;
+        ota_state.last_result_ok = true;
+        strncpy(ota_state.phase, "SUCCESS", sizeof(ota_state.phase) - 1);
+        strncpy(ota_state.message, "OTA erfolgreich, Neustart folgt", sizeof(ota_state.message) - 1);
+        ota_state.last_error[0] = '\0';
+        ota_state.last_end_ms = (uint64_t)(esp_timer_get_time() / 1000);
+        xSemaphoreGive(ota_state_mutex);
+
+        ESP_LOGI(TAG, "✅ OTA successful, restarting device");
+        ota_task_handle = NULL;
+        free(url);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+
+    if (ota_begun && err != ESP_OK && !ota_aborted) {
+        // Ensure handle is not leaked in case finish path was not reached.
+        esp_https_ota_abort(ota_handle);
+    }
+
+    xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+    ota_state.in_progress = false;
+    ota_state.last_result_ok = false;
+    strncpy(ota_state.phase, "FAILED", sizeof(ota_state.phase) - 1);
+    strncpy(ota_state.message, "OTA fehlgeschlagen", sizeof(ota_state.message) - 1);
+    strncpy(ota_state.last_error, esp_err_to_name(err), sizeof(ota_state.last_error) - 1);
+    ota_state.last_end_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    xSemaphoreGive(ota_state_mutex);
+
+    ota_task_handle = NULL;
+    free(url);
+    vTaskDelete(NULL);
 }
 
 /**
@@ -3326,6 +3582,22 @@ static httpd_handle_t start_webserver(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &sensor_reset_uri);
+
+        httpd_uri_t ota_start_uri = {
+            .uri = "/api/ota/start",
+            .method = HTTP_POST,
+            .handler = ota_start_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &ota_start_uri);
+
+        httpd_uri_t ota_status_uri = {
+            .uri = "/api/ota/status",
+            .method = HTTP_GET,
+            .handler = ota_status_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &ota_status_uri);
         
         // Register POST /api/system/reset
         httpd_uri_t reset_uri = {
@@ -3408,6 +3680,11 @@ void app_main(void)
     wifi_state_mutex = xSemaphoreCreateMutex();
     if (wifi_state_mutex == NULL) {
         ESP_LOGE(TAG, "❌ Failed to create wifi_state mutex!");
+        return;
+    }
+    ota_state_mutex = xSemaphoreCreateMutex();
+    if (ota_state_mutex == NULL) {
+        ESP_LOGE(TAG, "❌ Failed to create ota_state mutex!");
         return;
     }
     ESP_LOGI(TAG, "   ✓ sys_state mutex created");
