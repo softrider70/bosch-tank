@@ -1616,7 +1616,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
 }
 
 /**
- * @brief Handler: POST /api/ota/start - Start OTA from HTTPS URL
+ * @brief Handler: POST /api/ota/start - Start OTA from HTTP(S) URL
  */
 static esp_err_t ota_start_handler(httpd_req_t *req)
 {
