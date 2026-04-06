@@ -2233,6 +2233,17 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <div class="status-row"><span>Top Task:</span><span id="cpu-top-task">-</span></div>
 <div class="status-row"><span>Task Last:</span><span id="cpu-top-task-pct">-</span></div>
 <div class="status-row"><span>Tasks Gesamt:</span><span id="cpu-task-count">-</span></div>
+<div style="margin:10px 0 4px 0;font-weight:700;font-size:13px;">OTA & Firmware</div>
+<div class="status-row"><span>OTA-Status:</span><span id="ota-status">-</span></div>
+<div class="status-row"><span>OTA-Phase:</span><span id="ota-phase">-</span></div>
+<div class="status-row"><span>OTA-Meldung:</span><span id="ota-message">-</span></div>
+<div class="status-row"><span>In Arbeit:</span><span id="ota-in-progress">-</span></div>
+<div class="status-row"><span>Aktuelle Version:</span><span id="ota-current-version">-</span></div>
+<div class="status-row"><span>Zielversion:</span><span id="ota-target-version">-</span></div>
+<div class="status-row"><span>Letztes Ergebnis:</span><span id="ota-last-result">-</span></div>
+<div class="status-row"><span>Letzter Fehler:</span><span id="ota-last-error">-</span></div>
+<div class="status-row"><span>Start seit Boot:</span><span id="ota-last-start">-</span></div>
+<div class="status-row"><span>Ende seit Boot:</span><span id="ota-last-end">-</span></div>
 <div style="margin-top:8px;font-size:11px;color:#6b7280">Hinweis: Doppeltipp auf gruene Reset-Taste startet Sensor-Reinit.</div>
 <div id="msg-diagnostics" class="msg" style="display:none"></div>
 </div>
@@ -2242,6 +2253,7 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <script>
 let isFilling = false;
 let isEmergencyActive = false;
+let isTankFull = false;
 let dashboardTimer = null;
 let dashboardPollInFlight = false;
 let settingsSaveInFlight = false;
@@ -2253,9 +2265,68 @@ let lastResetTapMs = 0;
 let lastStatusTimestamp = 0;
 let stagnantStatusCount = 0;
 const DASHBOARD_REFRESH_MS = 350;
+const DIAGNOSTICS_REFRESH_MS = 2500;
 function scheduleDashboardRefresh(delay){
     if(dashboardTimer) clearTimeout(dashboardTimer);
     dashboardTimer = setTimeout(() => updateDashboard(), delay);
+}
+let diagnosticsPollTimer = null;
+let diagnosticsPollInFlight = false;
+function scheduleDiagnosticsRefresh(delay = DIAGNOSTICS_REFRESH_MS){
+    if(diagnosticsPollTimer) clearTimeout(diagnosticsPollTimer);
+    diagnosticsPollTimer = setTimeout(() => {
+        if(document.getElementById('diagnostics')?.classList.contains('active')){
+            loadDiagnostics();
+        }
+    }, delay);
+}
+function clearDiagnosticsRefresh(){
+    if(diagnosticsPollTimer) clearTimeout(diagnosticsPollTimer);
+    diagnosticsPollTimer = null;
+}
+function loadDiagnostics(force){
+    if(diagnosticsPollInFlight && !force) return;
+    diagnosticsPollInFlight = true;
+    fetch('/api/ota/status?t=' + Date.now(), {cache: 'no-store'})
+        .then(r => { if(!r.ok) throw new Error('API error: ' + r.status); return r.json(); })
+        .then(d => {
+            const ota = d.ota || {};
+            const statusEl = document.getElementById('ota-status');
+            const phaseEl = document.getElementById('ota-phase');
+            const messageEl = document.getElementById('ota-message');
+            const inProgressEl = document.getElementById('ota-in-progress');
+            const currentVersionEl = document.getElementById('ota-current-version');
+            const targetVersionEl = document.getElementById('ota-target-version');
+            const lastResultEl = document.getElementById('ota-last-result');
+            const lastErrorEl = document.getElementById('ota-last-error');
+            const lastStartEl = document.getElementById('ota-last-start');
+            const lastEndEl = document.getElementById('ota-last-end');
+            if(statusEl) statusEl.textContent = d.status || '-';
+            if(phaseEl) phaseEl.textContent = ota.phase || '-';
+            if(messageEl) messageEl.textContent = ota.message || '-';
+            if(inProgressEl) inProgressEl.textContent = ota.in_progress ? 'Ja' : 'Nein';
+            if(currentVersionEl) currentVersionEl.textContent = ota.current_version || '-';
+            if(targetVersionEl) targetVersionEl.textContent = ota.target_version || '-';
+            if(lastResultEl) lastResultEl.textContent = ota.last_result_ok ? 'OK' : 'FAIL';
+            if(lastErrorEl) lastErrorEl.textContent = ota.last_error || '-';
+            if(lastStartEl) lastStartEl.textContent = ota.last_start_ms ? (Number(ota.last_start_ms) / 1000).toFixed(1) + ' s' : '-';
+            if(lastEndEl) lastEndEl.textContent = ota.last_end_ms ? (Number(ota.last_end_ms) / 1000).toFixed(1) + ' s' : '-';
+        })
+        .catch(e => {
+            console.error('loadDiagnostics failed:', e);
+            const msgEl = document.getElementById('msg-diagnostics');
+            if(msgEl){
+                msgEl.textContent = 'OTA-Status konnte nicht geladen werden';
+                msgEl.className = 'msg error';
+                msgEl.style.display = 'block';
+            }
+        })
+        .finally(() => {
+            diagnosticsPollInFlight = false;
+            if(document.getElementById('diagnostics')?.classList.contains('active')){
+                scheduleDiagnosticsRefresh();
+            }
+        });
 }
 function syncSaveButton(){
     const btn = document.getElementById('save-btn');
@@ -2266,11 +2337,12 @@ function syncSaveButton(){
 }
 function syncFillButton(){
     const btn = document.getElementById('fill-btn');
-        if(btn){
-            btn.textContent = isFilling ? 'BEFUELLEN STOPPEN' : 'BEFUELLEN';
-            btn.disabled = isEmergencyActive;
-            btn.style.opacity = isEmergencyActive ? '0.5' : '1';
-        }
+    if(btn){
+        btn.textContent = isFilling ? 'BEFUELLEN STOPPEN' : 'BEFUELLEN';
+        const disabled = isEmergencyActive || isTankFull;
+        btn.disabled = disabled;
+        btn.style.opacity = disabled ? '0.5' : '1';
+    }
 }
 function syncValveIndicator(open){
     const valveEl = document.getElementById('valve');
@@ -2413,6 +2485,11 @@ function switchTab(evt, t){
     if(evt && evt.target) evt.target.classList.add('active');
   if(t==='settings') loadSettings();
   if(t==='wifi') loadWiFi();
+  if(t==='diagnostics'){
+      loadDiagnostics(true);
+  } else {
+      clearDiagnosticsRefresh();
+  }
 }
 function showMsg(tabId, text, isErr){
   const el = document.getElementById('msg-'+tabId);
@@ -2431,6 +2508,7 @@ function updateDashboard(force){
     const sensors = d.sensors || {};
     const valve = d.valve || {};
     const system = d.system || {};
+    isTankFull = !!sensors.tank_full;
     const timestamp = Number(d.timestamp || 0);
     if(timestamp > 0 && timestamp === lastStatusTimestamp){
         stagnantStatusCount++;
