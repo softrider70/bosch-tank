@@ -9,5 +9,6 @@
     ],
     "idf.customExtraVars": {
         "IDF_TARGET": "esp32"
-    }
+    },
+    "idf.currentSetup": "C:\\esp\\v6.0\\esp-idf"
 }

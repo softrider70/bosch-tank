@@ -1,6 +1,6 @@
 version: "1.1"
-description: "delongi-tank - ESP32 Application"
-url: "https://github.com/your-org/delongi-tank"
+description: "bosch-tank - ESP32 Application"
+url: "https://github.com/your-org/bosch-tank"
 
 dependencies:
   # Add your component dependencies here
@@ -14,3 +14,4 @@ dependencies:
 # examples:
 #   example_name:
 #     description: "Example description"
+

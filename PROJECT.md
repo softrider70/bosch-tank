@@ -1,5 +1,5 @@
 ---
-project_name: delongi-tank
+project_name: bosch-tank
 author: user
 version: 0.1.0
 description: |
@@ -150,3 +150,4 @@ notes: |
   - OTA-Partitionierung ist auf `partitions_ota_custom.csv` umgestellt (groessere A/B-App-Slots).
   - OTA kann fuer lokalen VS-Code-Workflow via HTTP oder HTTPS gestartet werden.
   - Flash-Modus ist zur Laufzeit per Script schaltbar: `tools/flash-mode.ps1 -Mode usb|ota`.
+
