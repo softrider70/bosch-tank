@@ -1,15 +1,12 @@
 {
-    "git.ignoreLimitWarning": true,
     "[c]": {
-        "editor.defaultFormatter": "ms-vscode.cpptools",
-        "editor.formatOnSave": false
+        "editor.defaultFormatter": "ms-vscode.cpptools"
     },
     "idf.flashBaudRate": "921600",
     "idf.portWin": "COM3",
     "idf.openOcdConfigs": [
         "board/esp32-wrover-kit-3.3v.cfg"
     ],
-    "idf.showOnboardingOnInit": false,
     "idf.customExtraVars": {
         "IDF_TARGET": "esp32"
     }
