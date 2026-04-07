@@ -46,7 +46,7 @@ CONFIG_SPIRAM_USE=y
 CONFIG_SPIRAM_USE_MALLOC=y
 
 # ============================================================================
-# I2C Configuration (for VL53L0X sensor)
+# I2C Configuration (for TOF sensor)
 # ============================================================================
 CONFIG_I2C_ENABLED=y
 CONFIG_I2C_ISR_IRAM_SAFE=y

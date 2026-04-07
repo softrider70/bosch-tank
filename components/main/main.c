@@ -1,6 +1,6 @@
 /**
  * bosch-tank: Automated Water Tank Management System
- * ESP32-based automatic filling control for coffee machines with VL53L0X ToF sensor
+ * ESP32-based automatic filling control for coffee machines with VL6150X/VL6180X-compatible ToF sensor
  * 
  * Main application entry point - Phase 1 Implementation
  */
@@ -297,11 +297,11 @@ static esp_err_t init_nvs(void)
 }
 
 // ============================================================================
-// Phase 1: I2C Initialization (for VL53L0X sensor)
+// Phase 1: I2C Initialization (for VL6150X/VL6180X TOF sensor)
 // ============================================================================
 
 /**
- * @brief Initialize I2C bus for VL53L0X ToF sensor (ESP-IDF v6.0 API)
+ * @brief Initialize I2C bus for VL6150X/VL6180X-compatible TOF sensor (ESP-IDF v6.0 API)
  */
 static esp_err_t init_i2c(void)
 {
@@ -315,7 +315,7 @@ static esp_err_t init_i2c(void)
         .glitch_ignore_cnt = 7,
         .intr_priority = 0,
         .trans_queue_depth = 0,
-        // External 4.7k pull-ups are present on the VL53L0X board,
+        // External 4.7k pull-ups are present on the TOF sensor board,
         // so disable the ESP32 internal I2C pull-ups to avoid conflicts.
         .flags.enable_internal_pullup = false,
         .flags.allow_pd = false,
@@ -329,7 +329,7 @@ static esp_err_t init_i2c(void)
 
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = VL53L0X_ADDR,
+        .device_address = TOF_SENSOR_ADDR,
         .scl_speed_hz = I2C_MASTER_FREQ_HZ,
         .scl_wait_us = I2C_DEVICE_SCL_WAIT_US,
         .flags.disable_ack_check = false,
@@ -337,7 +337,7 @@ static esp_err_t init_i2c(void)
 
     ret = i2c_master_bus_add_device(i2c_bus_handle, &dev_config, &vl53l0x_dev_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "VL53L0X device registration failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "TOF device registration failed: %s", esp_err_to_name(ret));
         i2c_del_master_bus(i2c_bus_handle);
         i2c_bus_handle = NULL;
         return ret;
@@ -1703,7 +1703,7 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
 }
 
 /**
- * @brief Handler: POST /api/sensor/reset - Request VL53L0X reinitialization
+ * @brief Handler: POST /api/sensor/reset - Request TOF sensor reinitialization
  */
 static esp_err_t sensor_reset_handler(httpd_req_t *req)
 {
@@ -2246,6 +2246,12 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <div class="status-row"><span>Letzter Fehler:</span><span id="ota-last-error">-</span></div>
 <div class="status-row"><span>Start seit Boot:</span><span id="ota-last-start">-</span></div>
 <div class="status-row"><span>Ende seit Boot:</span><span id="ota-last-end">-</span></div>
+<div style="margin-top:10px;padding-top:10px;border-top:1px solid #ddd">
+<label for="ota-url">Firmware-URL:</label>
+<input type="text" id="ota-url" value="http://192.168.1.191/bosch-tank.bin" placeholder="http://192.168.1.191/bosch-tank.bin">
+<div class="buttons"><button class="btn-success" id="ota-start-btn" onclick="startOTA()">OTA starten</button></div>
+<div style="margin-top:6px;font-size:11px;color:#6b7280">Voreingestellt auf Laptop-IP 192.168.1.191.</div>
+</div>
 <div style="margin-top:8px;font-size:11px;color:#6b7280">Hinweis: Doppeltipp auf gruene Reset-Taste startet Sensor-Reinit.</div>
 <div id="msg-diagnostics" class="msg" style="display:none"></div>
 </div>
@@ -2256,6 +2262,7 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 let isFilling = false;
 let isEmergencyActive = false;
 let isTankFull = false;
+let fillActionInFlight = false;
 let dashboardTimer = null;
 let dashboardPollInFlight = false;
 let settingsSaveInFlight = false;
@@ -2268,6 +2275,12 @@ let lastStatusTimestamp = 0;
 let stagnantStatusCount = 0;
 const DASHBOARD_REFRESH_MS = 350;
 const DIAGNOSTICS_REFRESH_MS = 2500;
+const OTA_BINARY_NAME = 'bosch-tank.bin';
+function setDefaultOtaUrl() {
+    const input = document.getElementById('ota-url');
+    if (!input) return;
+    input.value = `http://192.168.1.191/${OTA_BINARY_NAME}`;
+}
 function scheduleDashboardRefresh(delay){
     if(dashboardTimer) clearTimeout(dashboardTimer);
     dashboardTimer = setTimeout(() => updateDashboard(), delay);
@@ -2303,6 +2316,7 @@ function loadDiagnostics(force){
             const lastErrorEl = document.getElementById('ota-last-error');
             const lastStartEl = document.getElementById('ota-last-start');
             const lastEndEl = document.getElementById('ota-last-end');
+            const otaButton = document.getElementById('ota-start-btn');
             if(statusEl) statusEl.textContent = d.status || '-';
             if(phaseEl) phaseEl.textContent = ota.phase || '-';
             if(messageEl) messageEl.textContent = ota.message || '-';
@@ -2313,6 +2327,7 @@ function loadDiagnostics(force){
             if(lastErrorEl) lastErrorEl.textContent = ota.last_error || '-';
             if(lastStartEl) lastStartEl.textContent = ota.last_start_ms ? (Number(ota.last_start_ms) / 1000).toFixed(1) + ' s' : '-';
             if(lastEndEl) lastEndEl.textContent = ota.last_end_ms ? (Number(ota.last_end_ms) / 1000).toFixed(1) + ' s' : '-';
+            if(otaButton) otaButton.disabled = ota.in_progress;
         })
         .catch(e => {
             console.error('loadDiagnostics failed:', e);
@@ -2330,6 +2345,32 @@ function loadDiagnostics(force){
             }
         });
 }
+function startOTA(){
+    const urlInput = document.getElementById('ota-url');
+    const url = urlInput ? urlInput.value.trim() : '';
+    if(!url){
+        showMsg('diagnostics', 'Bitte OTA-URL eingeben', true);
+        return;
+    }
+    const btn = document.getElementById('ota-start-btn');
+    if(btn){ btn.disabled = true; btn.style.opacity = '0.6'; }
+    fetch('/api/ota/start', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url})
+    }).then(async r => {
+        if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status));
+        return r.json();
+    }).then(d => {
+        showMsg('diagnostics', d.message || 'OTA gestartet', false);
+        loadDiagnostics(true);
+    }).catch(e => {
+        console.error('startOTA failed:', e);
+        showMsg('diagnostics', 'OTA start fehlgeschlagen: ' + e.message, true);
+    }).finally(() => {
+        if(btn){ btn.disabled = false; btn.style.opacity = '1'; }
+    });
+}
 function syncSaveButton(){
     const btn = document.getElementById('save-btn');
     if(!btn) return;
@@ -2340,8 +2381,12 @@ function syncSaveButton(){
 function syncFillButton(){
     const btn = document.getElementById('fill-btn');
     if(btn){
-        btn.textContent = isFilling ? 'BEFUELLEN STOPPEN' : 'BEFUELLEN';
-        const disabled = isEmergencyActive || isTankFull;
+        if(fillActionInFlight){
+            btn.textContent = '...';
+        } else {
+            btn.textContent = isFilling ? 'BEFUELLEN STOPPEN' : 'BEFUELLEN';
+        }
+        const disabled = isEmergencyActive || isTankFull || fillActionInFlight;
         btn.disabled = disabled;
         btn.style.opacity = disabled ? '0.5' : '1';
     }
@@ -2488,6 +2533,7 @@ function switchTab(evt, t){
   if(t==='settings') loadSettings();
   if(t==='wifi') loadWiFi();
   if(t==='diagnostics'){
+      setDefaultOtaUrl();
       loadDiagnostics(true);
   } else {
       clearDiagnosticsRefresh();
@@ -2569,7 +2615,35 @@ function updateDashboard(force){
         scheduleDashboardRefresh(DASHBOARD_REFRESH_MS);
     });
 }
-function fill(){if(isEmergencyActive){showMsg('dashboard', 'Notaus aktiv - erst RESET ausfuehren', true); return;} const nextAction = isFilling ? 'close' : 'open'; fetch('/api/valve/manual', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: nextAction})}).then(r => r.json()).then(d => {isFilling = !!d.manual_fill_active; syncFillButton(); updateDashboard(true); if(d.message) showMsg('dashboard', d.message, false);}).catch(() => updateDashboard(true));}
+function fill(){
+    if(isEmergencyActive){
+        showMsg('dashboard', 'Notaus aktiv - erst RESET ausfuehren', true);
+        return;
+    }
+    const nextAction = isFilling ? 'close' : 'open';
+    fillActionInFlight = true;
+    syncFillButton();
+    fetch('/api/valve/manual', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: nextAction})
+    }).then(async r => {
+        if(!r.ok) throw new Error(await r.text() || ('API error: ' + r.status));
+        return r.json();
+    }).then(d => {
+        isFilling = !!d.manual_fill_active;
+        syncFillButton();
+        updateDashboard(true);
+        if(d.message) showMsg('dashboard', d.message, false);
+    }).catch(e => {
+        console.error('fill request failed:', e);
+        updateDashboard(true);
+        showMsg('dashboard', 'Ventilsteuerung fehlgeschlagen', true);
+    }).finally(() => {
+        fillActionInFlight = false;
+        syncFillButton();
+    });
+}
 function stop(){fetch('/api/valve/stop', {method: 'POST'}).then(() => {isFilling = false; updateDashboard(true); showMsg('dashboard', 'Ventil geschlossen', false);});}
 function resetEmergency(){if(!isEmergencyActive){if(resetHoldTriggered) return; const now = Date.now(); const isDoubleTap = (now - lastResetTapMs) <= 450; lastResetTapMs = now; if(isDoubleTap){resetSensor(); return;} if(hasStickyWarning){resetWarnings(); return;} showMsg('dashboard', 'Doppeltipp: Sensor-Reinit | 3 Sekunden halten: Zaehler-Reset', false); return;} fetch('/api/emergency_stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset'})}).then(r => r.json()).then(d => {updateDashboard(true); document.getElementById('emergency-reason').style.display = 'none'; showMsg('dashboard', d.message || 'Reset ausgefuehrt', false);}).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
 function loadSettings(){fetch('/api/config').then(r => r.json()).then(d => {document.getElementById('top').value = d.config.threshold_top_cm; document.getElementById('bottom').value = d.config.threshold_bottom_cm; document.getElementById('timeout').value = d.config.timeout_max_ms; document.getElementById('fill-progress-timeout').value = d.config.fill_progress_timeout_ms; document.getElementById('flow-rate').value = d.config.flow_rate_l_per_min;});}
@@ -2591,147 +2665,124 @@ updateDashboard();
 }
 
 // ============================================================================
-// Phase 1: Sensor Task (VL53L0X Distance Measurement)
+// Phase 1: Sensor Task (VL6150X/VL6180X Distance Measurement)
 // ============================================================================
 
 // ============================================================================
-// VL53L0X Pololu Library Port (v1.3.0 → ESP-IDF C)
-// Based on: https://github.com/pololu/vl53l0x-arduino
+// VL6150X / VL6180X ToF Sensor Port (TOF050C)
+// Based on: Adafruit VL6180X driver for Arduino
+// This code now supports ST FlightSense VL6150X-compatible sensors on I2C addr 0x29
 // ============================================================================
 
-// --- VL53L0X Register Map (from Pololu VL53L0X.h) ---
-#define SYSRANGE_START                              0x00
-#define SYSTEM_SEQUENCE_CONFIG                      0x01
-#define SYSTEM_INTERMEASUREMENT_PERIOD              0x04
-#define SYSTEM_INTERRUPT_CONFIG_GPIO                0x0A
-#define GPIO_HV_MUX_ACTIVE_HIGH                     0x84
-#define SYSTEM_INTERRUPT_CLEAR                      0x0B
-#define RESULT_INTERRUPT_STATUS                     0x13
-#define RESULT_RANGE_STATUS                         0x14
-#define CROSSTALK_COMPENSATION_PEAK_RATE_MCPS       0x20
-#define I2C_SLAVE_DEVICE_ADDRESS                    0x8A
-#define MSRC_CONFIG_CONTROL                         0x60
-#define PRE_RANGE_CONFIG_MIN_SNR                    0x27
-#define PRE_RANGE_CONFIG_VALID_PHASE_LOW            0x56
-#define PRE_RANGE_CONFIG_VALID_PHASE_HIGH           0x57
-#define PRE_RANGE_MIN_COUNT_RATE_RTN_LIMIT          0x64
-#define FINAL_RANGE_CONFIG_MIN_SNR                  0x67
-#define FINAL_RANGE_CONFIG_VALID_PHASE_LOW          0x47
-#define FINAL_RANGE_CONFIG_VALID_PHASE_HIGH         0x48
-#define FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT 0x44
-#define PRE_RANGE_CONFIG_SIGMA_THRESH_HI            0x61
-#define PRE_RANGE_CONFIG_SIGMA_THRESH_LO            0x62
-#define PRE_RANGE_CONFIG_VCSEL_PERIOD               0x50
-#define PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI          0x51
-#define PRE_RANGE_CONFIG_TIMEOUT_MACROP_LO          0x52
-#define FINAL_RANGE_CONFIG_VCSEL_PERIOD             0x70
-#define FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI        0x71
-#define FINAL_RANGE_CONFIG_TIMEOUT_MACROP_LO        0x72
-#define MSRC_CONFIG_TIMEOUT_MACROP                  0x46
-#define IDENTIFICATION_MODEL_ID                     0xC0
-#define IDENTIFICATION_REVISION_ID                  0xC2
-#define OSC_CALIBRATE_VAL                           0xF8
-#define GLOBAL_CONFIG_VCSEL_WIDTH                   0x32
-#define GLOBAL_CONFIG_SPAD_ENABLES_REF_0            0xB0
-#define GLOBAL_CONFIG_REF_EN_START_SELECT           0xB6
-#define DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD         0x4E
-#define DYNAMIC_SPAD_REF_EN_START_OFFSET            0x4F
-#define ALGO_PHASECAL_LIM                           0x30
-#define ALGO_PHASECAL_CONFIG_TIMEOUT                0x30
-#define VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV           0x89
+// --- VL6180X Register Map ---
+#define SYSRANGE_START                              0x0018
+#define SYSRANGE_PART_TO_PART_RANGE_OFFSET          0x0024
+#define SYSALS_START                                0x0038
+#define SYSALS_ANALOGUE_GAIN                        0x003F
+#define SYSALS_INTEGRATION_PERIOD_HI                0x0040
+#define SYSALS_INTEGRATION_PERIOD_LO                0x0041
+#define SYSTEM_INTERRUPT_CONFIG                     0x0014
+#define SYSTEM_INTERRUPT_CLEAR                      0x0015
+#define SYSTEM_FRESH_OUT_OF_RESET                   0x0016
+#define RESULT_RANGE_STATUS                         0x004D
+#define RESULT_INTERRUPT_STATUS_GPIO                0x004F
+#define RESULT_ALS_VAL                              0x0050
+#define RESULT_RANGE_VAL                            0x0062
+#define IDENTIFICATION_MODEL_ID                     0x0000
+#define IDENTIFICATION_REVISION_ID                  0x0001
+#define SLAVE_DEVICE_ADDRESS                        0x0212
+#define SYSRANGE__INTERMEASUREMENT_PERIOD           0x001B
 
 // Module-level state
-static uint8_t vl53l0x_stop_variable = 0;
+static int unused_tof_state_marker = 0;
 
 #define I2C_TRANSFER_TIMEOUT_MS 1000
 #define I2C_SCAN_TIMEOUT_MS 200
 #define SENSOR_AUTO_REINIT_FAIL_THRESHOLD 20
 #define SENSOR_AUTO_REINIT_COOLDOWN_MS 10000
-static esp_err_t vl53l0x_i2c_write(const uint8_t *data, size_t len)
+static esp_err_t tof_i2c_write(const uint8_t *data, size_t len)
 {
     esp_err_t ret = i2c_master_transmit(vl53l0x_dev_handle, data, len, I2C_TRANSFER_TIMEOUT_MS);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "VL53L0X I2C write failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "ToF I2C write failed: %s", esp_err_to_name(ret));
     }
     return ret;
 }
 
-static esp_err_t vl53l0x_i2c_write_read(const uint8_t *write_data, size_t write_len, uint8_t *read_data, size_t read_len)
+static esp_err_t tof_i2c_write_read(const uint8_t *write_data, size_t write_len, uint8_t *read_data, size_t read_len)
 {
     esp_err_t ret = i2c_master_transmit_receive(vl53l0x_dev_handle, write_data, write_len, read_data, read_len, I2C_TRANSFER_TIMEOUT_MS);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "VL53L0X I2C write/read failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "ToF I2C write/read failed: %s", esp_err_to_name(ret));
     }
     return ret;
 }
 
 // --- I2C Low-Level Helpers ---
 
-static esp_err_t vl53l0x_write_reg(uint8_t reg, uint8_t value)
+static esp_err_t vl53l0x_write_reg(uint16_t reg, uint8_t value)
 {
-    uint8_t data[2] = {reg, value};
-    return vl53l0x_i2c_write(data, sizeof(data));
+    uint8_t data[3] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF), value};
+    return tof_i2c_write(data, sizeof(data));
 }
 
-static esp_err_t vl53l0x_write_reg16(uint8_t reg, uint16_t value)
+static esp_err_t vl53l0x_write_reg16(uint16_t reg, uint16_t value)
 {
-    uint8_t data[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
-    return vl53l0x_i2c_write(data, sizeof(data));
+    uint8_t data[4] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF), (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
+    return tof_i2c_write(data, sizeof(data));
 }
 
-static esp_err_t __attribute__((unused)) vl53l0x_write_reg32(uint8_t reg, uint32_t value)
+static esp_err_t vl53l0x_write_multi(uint16_t reg, const uint8_t *src, uint8_t count)
 {
-    uint8_t data[5] = {reg, (uint8_t)(value >> 24), (uint8_t)(value >> 16),
-                       (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
-    return vl53l0x_i2c_write(data, sizeof(data));
+    uint8_t buf[2 + count];
+    buf[0] = (uint8_t)(reg >> 8);
+    buf[1] = (uint8_t)(reg & 0xFF);
+    memcpy(&buf[2], src, count);
+    return tof_i2c_write(buf, count + 2);
 }
 
-static esp_err_t vl53l0x_write_multi(uint8_t reg, const uint8_t *src, uint8_t count)
-{
-    uint8_t buf[count + 1];
-    buf[0] = reg;
-    memcpy(&buf[1], src, count);
-    return vl53l0x_i2c_write(buf, count + 1);
-}
-
-static uint8_t vl53l0x_read_reg(uint8_t reg)
+static uint8_t vl53l0x_read_reg(uint16_t reg)
 {
     uint8_t value = 0;
-    esp_err_t ret = vl53l0x_i2c_write_read(&reg, 1, &value, 1);
+    uint8_t addr[2] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF)};
+    esp_err_t ret = tof_i2c_write_read(addr, sizeof(addr), &value, 1);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "VL53L0X read reg 0x%02X failed: %s", reg, esp_err_to_name(ret));
+        ESP_LOGW(TAG, "ToF read reg 0x%04X failed: %s", reg, esp_err_to_name(ret));
         return 0;
     }
     return value;
 }
 
-static uint16_t vl53l0x_read_reg16(uint8_t reg)
+static uint16_t vl53l0x_read_reg16(uint16_t reg)
 {
     uint8_t data[2] = {0};
-    esp_err_t ret = vl53l0x_i2c_write_read(&reg, 1, data, 2);
+    uint8_t addr[2] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF)};
+    esp_err_t ret = tof_i2c_write_read(addr, sizeof(addr), data, 2);
     if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "VL53L0X read reg16 0x%02X failed: %s", reg, esp_err_to_name(ret));
+        ESP_LOGW(TAG, "ToF read reg16 0x%04X failed: %s", reg, esp_err_to_name(ret));
         return 0;
     }
     return ((uint16_t)data[0] << 8) | data[1];
 }
 
-static bool vl53l0x_read_reg_retry(uint8_t reg, uint8_t *value, int attempts)
+static bool vl53l0x_read_reg_retry(uint16_t reg, uint8_t *value, int attempts)
 {
     for (int i = 0; i < attempts; i++) {
-        esp_err_t ret = vl53l0x_i2c_write_read(&reg, 1, value, 1);
+        uint8_t addr[2] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF)};
+        esp_err_t ret = tof_i2c_write_read(addr, sizeof(addr), value, 1);
         if (ret == ESP_OK) {
             return true;
         }
-        ESP_LOGW(TAG, "VL53L0X read reg 0x%02X attempt %d failed: %s", reg, i + 1, esp_err_to_name(ret));
+        ESP_LOGW(TAG, "ToF read reg 0x%04X attempt %d failed: %s", reg, i + 1, esp_err_to_name(ret));
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     return false;
 }
 
-static esp_err_t vl53l0x_read_multi(uint8_t reg, uint8_t *dst, uint8_t count)
+static esp_err_t vl53l0x_read_multi(uint16_t reg, uint8_t *dst, uint8_t count)
 {
-    return vl53l0x_i2c_write_read(&reg, 1, dst, count);
+    uint8_t addr[2] = {(uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF)};
+    return tof_i2c_write_read(addr, sizeof(addr), dst, count);
 }
 
 // --- I2C Bus Scan (optimized) ---
@@ -2744,7 +2795,7 @@ static void i2c_scan_bus(void)
         esp_task_wdt_reset();
         esp_err_t ret = i2c_master_probe(i2c_bus_handle, addr, I2C_SCAN_TIMEOUT_MS);
         if (ret == ESP_OK) {
-            const char *name = (addr == 0x29) ? " (VL53L0X)" :
+            const char *name = (addr == 0x29) ? " (TOF sensor)" :
                                (addr == 0x52) ? " (EEPROM)" :
                                (addr == 0x68) ? " (MPU6050)" :
                                (addr == 0x76) ? " (BME280)" : "";
@@ -2755,319 +2806,123 @@ static void i2c_scan_bus(void)
     ESP_LOGI(TAG, "   Scan: %d device(s) found", found);
 }
 
-// --- Pololu: getSpadInfo() ---
+// --- VL6180X Helper Routines ---
 
-static bool vl53l0x_get_spad_info(uint8_t *count, bool *type_is_aperture)
-{
-    uint8_t tmp;
-    vl53l0x_write_reg(0x80, 0x01);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x00, 0x00);
-    vl53l0x_write_reg(0xFF, 0x06);
-    vl53l0x_write_reg(0x83, vl53l0x_read_reg(0x83) | 0x04);
-    vl53l0x_write_reg(0xFF, 0x07);
-    vl53l0x_write_reg(0x81, 0x01);
-    vl53l0x_write_reg(0x80, 0x01);
-    vl53l0x_write_reg(0x94, 0x6b);
-    vl53l0x_write_reg(0x83, 0x00);
-    
-    uint32_t start = esp_timer_get_time() / 1000;
-    while (vl53l0x_read_reg(0x83) == 0x00) {
-        if ((esp_timer_get_time() / 1000 - start) > 500) return false;
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    
-    vl53l0x_write_reg(0x83, 0x01);
-    tmp = vl53l0x_read_reg(0x92);
-    *count = tmp & 0x7F;
-    *type_is_aperture = (tmp >> 7) & 0x01;
-    
-    vl53l0x_write_reg(0x81, 0x00);
-    vl53l0x_write_reg(0xFF, 0x06);
-    vl53l0x_write_reg(0x83, vl53l0x_read_reg(0x83) & ~0x04);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x00, 0x01);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x80, 0x00);
-    return true;
-}
-
-// --- Pololu: performSingleRefCalibration() ---
-
-static bool vl53l0x_perform_single_ref_calibration(uint8_t vhv_init_byte)
-{
-    vl53l0x_write_reg(SYSRANGE_START, 0x01 | vhv_init_byte);
-    
-    uint32_t start = esp_timer_get_time() / 1000;
-    while ((vl53l0x_read_reg(RESULT_INTERRUPT_STATUS) & 0x07) == 0) {
-        if ((esp_timer_get_time() / 1000 - start) > 500) return false;
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    
-    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x01);
-    vl53l0x_write_reg(SYSRANGE_START, 0x00);
-    return true;
-}
-
-// --- Pololu: Full init() sequence ---
+// --- VL6180X init sequence ---
 
 static bool vl53l0x_sensor_ready(void)
 {
-    esp_err_t probe = i2c_master_probe(i2c_bus_handle, VL53L0X_ADDR, I2C_SCAN_TIMEOUT_MS);
+    esp_err_t probe = i2c_master_probe(i2c_bus_handle, TOF_SENSOR_ADDR, I2C_SCAN_TIMEOUT_MS);
     if (probe != ESP_OK) {
-        ESP_LOGE(TAG, "❌ VL53L0X I2C probe failed at 0x29: %s", esp_err_to_name(probe));
+        ESP_LOGE(TAG, "❌ ToF sensor I2C probe failed at 0x%02X: %s", TOF_SENSOR_ADDR, esp_err_to_name(probe));
         ESP_LOGE(TAG, "   Verify wiring, power, pull-ups, and that the sensor is not held in reset.");
         return false;
     }
 
     uint8_t id = 0;
     if (!vl53l0x_read_reg_retry(IDENTIFICATION_MODEL_ID, &id, 3)) {
-        ESP_LOGE(TAG, "❌ VL53L0X model register read failed after retries.");
-        ESP_LOGE(TAG, "   Device acked at 0x29 but did not return a valid model ID.");
+        ESP_LOGE(TAG, "❌ ToF sensor model register read failed after retries.");
+        ESP_LOGE(TAG, "   Device acked at 0x%02X but did not return a valid model ID.", TOF_SENSOR_ADDR);
         return false;
     }
 
-    if (id == 0xEE) {
+    if (id == 0xB4) {
         uint8_t rev = 0;
         if (!vl53l0x_read_reg_retry(IDENTIFICATION_REVISION_ID, &rev, 3)) {
-            ESP_LOGW(TAG, "⚠️  VL53L0X revision read failed, continuing with model OK");
+            ESP_LOGW(TAG, "⚠️  ToF sensor revision read failed, continuing with model OK");
         }
-        ESP_LOGI(TAG, "✅ VL53L0X FOUND (Model 0x%02X, Rev 0x%02X)", id, rev);
+        ESP_LOGI(TAG, "✅ VL6150X/VL6180X FOUND (Model 0x%02X, Rev 0x%02X)", id, rev);
         return true;
     }
 
-    ESP_LOGE(TAG, "❌ VL53L0X not found (got 0x%02X)", id);
-    ESP_LOGE(TAG, "   I2C device responded at 0x29, but the model register is invalid.");
+    ESP_LOGE(TAG, "❌ ToF sensor not found (got 0x%02X)", id);
+    ESP_LOGE(TAG, "   I2C device responded at 0x%02X, but the model register is invalid.", TOF_SENSOR_ADDR);
     ESP_LOGE(TAG, "   Possible causes: wrong sensor wiring/orientation, bad ground reference, or I2C bus noise.");
-    if (id == 0x00 || id == 0x10 || id == 0xBD) {
-        ESP_LOGE(TAG, "   Note: 0x%02X is not a valid VL53L0X ID.", id);
-    }
     return false;
+}
+
+static void vl53l0x_load_settings(void)
+{
+    // Recommended VL6180X initialization from Adafruit driver
+    vl53l0x_write_reg(0x0207, 0x01);
+    vl53l0x_write_reg(0x0208, 0x01);
+    vl53l0x_write_reg(0x0096, 0x00);
+    vl53l0x_write_reg(0x0097, 0xFD);
+    vl53l0x_write_reg(0x00E3, 0x00);
+    vl53l0x_write_reg(0x00E4, 0x04);
+    vl53l0x_write_reg(0x00E5, 0x02);
+    vl53l0x_write_reg(0x00E6, 0x01);
+    vl53l0x_write_reg(0x00E7, 0x03);
+    vl53l0x_write_reg(0x00F5, 0x02);
+    vl53l0x_write_reg(0x00D9, 0x05);
+    vl53l0x_write_reg(0x00DB, 0xCE);
+    vl53l0x_write_reg(0x00DC, 0x03);
+    vl53l0x_write_reg(0x00DD, 0xF8);
+    vl53l0x_write_reg(0x009F, 0x00);
+    vl53l0x_write_reg(0x00A3, 0x3C);
+    vl53l0x_write_reg(0x00B7, 0x00);
+    vl53l0x_write_reg(0x00BB, 0x3C);
+    vl53l0x_write_reg(0x00B2, 0x09);
+    vl53l0x_write_reg(0x00CA, 0x09);
+    vl53l0x_write_reg(0x0198, 0x01);
+    vl53l0x_write_reg(0x01B0, 0x17);
+    vl53l0x_write_reg(0x01AD, 0x00);
+    vl53l0x_write_reg(0x00FF, 0x05);
+    vl53l0x_write_reg(0x0100, 0x05);
+    vl53l0x_write_reg(0x0199, 0x05);
+    vl53l0x_write_reg(0x01A6, 0x1B);
+    vl53l0x_write_reg(0x01AC, 0x3E);
+    vl53l0x_write_reg(0x01A7, 0x1F);
+    vl53l0x_write_reg(0x0030, 0x00);
+    vl53l0x_write_reg(SYSTEM_INTERRUPT_CONFIG, 0x10);
+    vl53l0x_write_reg(0x010A, 0x30);
+    vl53l0x_write_reg(0x003F, 0x46);
+    vl53l0x_write_reg(0x0031, 0xFF);
+    vl53l0x_write_reg(0x0041, 0x63);
+    vl53l0x_write_reg(0x002E, 0x01);
+    vl53l0x_write_reg(SYSRANGE__INTERMEASUREMENT_PERIOD, 0x09);
+    vl53l0x_write_reg(0x003E, 0x31);
+    vl53l0x_write_reg(0x0014, 0x24);
 }
 
 static esp_err_t vl53l0x_init(void)
 {
-    ESP_LOGI(TAG, "🔧 VL53L0X Pololu full init...");
-    
-    // Verify model ID
-    if (vl53l0x_read_reg(IDENTIFICATION_MODEL_ID) != 0xEE) {
-        ESP_LOGE(TAG, "Model ID mismatch");
+    ESP_LOGI(TAG, "🔧 VL6150X/VL6180X init...");
+
+    uint8_t id = vl53l0x_read_reg(IDENTIFICATION_MODEL_ID);
+    if (id != 0xB4) {
+        ESP_LOGE(TAG, "Model ID mismatch: 0x%02X", id);
         return ESP_FAIL;
     }
-    
-    // === VL53L0X_DataInit() ===
-    
-    // Set I/O to 2V8 mode
-    vl53l0x_write_reg(VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV,
-                      vl53l0x_read_reg(VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV) | 0x01);
-    
-    // Set I2C standard mode
-    vl53l0x_write_reg(0x88, 0x00);
-    vl53l0x_write_reg(0x80, 0x01);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x00, 0x00);
-    vl53l0x_stop_variable = vl53l0x_read_reg(0x91);  // Critical: device-specific value
-    vl53l0x_write_reg(0x00, 0x01);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x80, 0x00);
-    
-    // Disable SIGNAL_RATE_MSRC and SIGNAL_RATE_PRE_RANGE limit checks
-    vl53l0x_write_reg(MSRC_CONFIG_CONTROL, vl53l0x_read_reg(MSRC_CONFIG_CONTROL) | 0x12);
-    
-    // Set signal rate limit to 0.25 MCPS (Q9.7 format)
-    vl53l0x_write_reg16(FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT, (uint16_t)(0.25 * (1 << 7)));
-    
-    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0xFF);
-    
-    ESP_LOGI(TAG, "   DataInit done, stop_variable=0x%02X", vl53l0x_stop_variable);
-    
-    // === VL53L0X_StaticInit() ===
-    
-    // Get SPAD info
-    uint8_t spad_count;
-    bool spad_type_is_aperture;
-    if (!vl53l0x_get_spad_info(&spad_count, &spad_type_is_aperture)) {
-        ESP_LOGE(TAG, "getSpadInfo failed");
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "   SPAD: count=%d, aperture=%d", spad_count, spad_type_is_aperture);
-    
-    // Read reference SPAD map
-    uint8_t ref_spad_map[6];
-    vl53l0x_read_multi(GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
-    
-    // Set reference SPADs
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(DYNAMIC_SPAD_REF_EN_START_OFFSET, 0x00);
-    vl53l0x_write_reg(DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD, 0x2C);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(GLOBAL_CONFIG_REF_EN_START_SELECT, 0xB4);
-    
-    uint8_t first_spad_to_enable = spad_type_is_aperture ? 12 : 0;
-    uint8_t spads_enabled = 0;
-    for (uint8_t i = 0; i < 48; i++) {
-        if (i < first_spad_to_enable || spads_enabled == spad_count) {
-            ref_spad_map[i / 8] &= ~(1 << (i % 8));
-        } else if ((ref_spad_map[i / 8] >> (i % 8)) & 0x1) {
-            spads_enabled++;
-        }
-    }
-    vl53l0x_write_multi(GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
-    
-    ESP_LOGI(TAG, "   SPAD calibration done (%d enabled)", spads_enabled);
-    
-    // === Load Tuning Settings (from vl53l0x_tuning.h) ===
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x00, 0x00);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x09, 0x00);
-    vl53l0x_write_reg(0x10, 0x00);
-    vl53l0x_write_reg(0x11, 0x00);
-    vl53l0x_write_reg(0x24, 0x01);
-    vl53l0x_write_reg(0x25, 0xFF);
-    vl53l0x_write_reg(0x75, 0x00);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x4E, 0x2C);
-    vl53l0x_write_reg(0x48, 0x00);
-    vl53l0x_write_reg(0x30, 0x20);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x30, 0x09);
-    vl53l0x_write_reg(0x54, 0x00);
-    vl53l0x_write_reg(0x31, 0x04);
-    vl53l0x_write_reg(0x32, 0x03);
-    vl53l0x_write_reg(0x40, 0x83);
-    vl53l0x_write_reg(0x46, 0x25);
-    vl53l0x_write_reg(0x60, 0x00);
-    vl53l0x_write_reg(0x27, 0x00);
-    vl53l0x_write_reg(0x50, 0x06);
-    vl53l0x_write_reg(0x51, 0x00);
-    vl53l0x_write_reg(0x52, 0x96);
-    vl53l0x_write_reg(0x56, 0x08);
-    vl53l0x_write_reg(0x57, 0x30);
-    vl53l0x_write_reg(0x61, 0x00);
-    vl53l0x_write_reg(0x62, 0x00);
-    vl53l0x_write_reg(0x64, 0x00);
-    vl53l0x_write_reg(0x65, 0x00);
-    vl53l0x_write_reg(0x66, 0xA0);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x22, 0x32);
-    vl53l0x_write_reg(0x47, 0x14);
-    vl53l0x_write_reg(0x49, 0xFF);
-    vl53l0x_write_reg(0x4A, 0x00);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x7A, 0x0A);
-    vl53l0x_write_reg(0x7B, 0x00);
-    vl53l0x_write_reg(0x78, 0x21);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x23, 0x34);
-    vl53l0x_write_reg(0x42, 0x00);
-    vl53l0x_write_reg(0x44, 0xFF);
-    vl53l0x_write_reg(0x45, 0x26);
-    vl53l0x_write_reg(0x46, 0x05);
-    vl53l0x_write_reg(0x40, 0x40);
-    vl53l0x_write_reg(0x0E, 0x06);
-    vl53l0x_write_reg(0x20, 0x1A);
-    vl53l0x_write_reg(0x43, 0x40);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x34, 0x03);
-    vl53l0x_write_reg(0x35, 0x44);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x31, 0x04);
-    vl53l0x_write_reg(0x4B, 0x09);
-    vl53l0x_write_reg(0x4C, 0x05);
-    vl53l0x_write_reg(0x4D, 0x04);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x44, 0x00);
-    vl53l0x_write_reg(0x45, 0x20);
-    vl53l0x_write_reg(0x47, 0x08);
-    vl53l0x_write_reg(0x48, 0x28);
-    vl53l0x_write_reg(0x67, 0x00);
-    vl53l0x_write_reg(0x70, 0x04);
-    vl53l0x_write_reg(0x71, 0x01);
-    vl53l0x_write_reg(0x72, 0xFE);
-    vl53l0x_write_reg(0x76, 0x00);
-    vl53l0x_write_reg(0x77, 0x00);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x0D, 0x01);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x80, 0x01);
-    vl53l0x_write_reg(0x01, 0xF8);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x8E, 0x01);
-    vl53l0x_write_reg(0x00, 0x01);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x80, 0x00);
-    
-    ESP_LOGI(TAG, "   Tuning settings loaded");
-    
-    // Set interrupt config to new sample ready
-    vl53l0x_write_reg(SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04);
-    vl53l0x_write_reg(GPIO_HV_MUX_ACTIVE_HIGH,
-                      vl53l0x_read_reg(GPIO_HV_MUX_ACTIVE_HIGH) & ~0x10);
-    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x01);
-    
-    // Disable MSRC and TCC by default
-    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0xE8);
-    
-    // === VL53L0X_PerformRefCalibration() ===
-    
-    // VHV calibration
-    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0x01);
-    if (!vl53l0x_perform_single_ref_calibration(0x40)) {
-        ESP_LOGE(TAG, "VHV calibration failed");
-        return ESP_FAIL;
-    }
-    
-    // Phase calibration
-    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0x02);
-    if (!vl53l0x_perform_single_ref_calibration(0x00)) {
-        ESP_LOGE(TAG, "Phase calibration failed");
-        return ESP_FAIL;
-    }
-    
-    // Restore sequence config
-    vl53l0x_write_reg(SYSTEM_SEQUENCE_CONFIG, 0xE8);
-    
-    ESP_LOGI(TAG, "✅ VL53L0X Pololu init complete (SPAD + Tuning + RefCal)");
+
+    // Always apply the recommended initialization register sequence to ensure
+    // consistent VL6180X behavior after power-up or from a preserved state.
+    vl53l0x_load_settings();
+    vl53l0x_write_reg(SYSTEM_FRESH_OUT_OF_RESET, 0x00);
+    ESP_LOGI(TAG, "   VL6180X init sequence applied");
+
     return ESP_OK;
 }
 
-// --- Pololu: readRangeSingleMillimeters() ---
+// --- VL6180X single-shot range read ---
 
 static uint16_t vl53l0x_read_single_mm(void)
 {
-    // Pololu single-shot measurement sequence using stop_variable
-    vl53l0x_write_reg(0x80, 0x01);
-    vl53l0x_write_reg(0xFF, 0x01);
-    vl53l0x_write_reg(0x00, 0x00);
-    vl53l0x_write_reg(0x91, vl53l0x_stop_variable);
-    vl53l0x_write_reg(0x00, 0x01);
-    vl53l0x_write_reg(0xFF, 0x00);
-    vl53l0x_write_reg(0x80, 0x00);
-    
-    // Trigger single-shot measurement
+    // Trigger a single-shot VL6180X range measurement.
+    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x07);
     vl53l0x_write_reg(SYSRANGE_START, 0x01);
-    
-    // Wait for start bit to clear
+
     uint32_t start = esp_timer_get_time() / 1000;
-    while (vl53l0x_read_reg(SYSRANGE_START) & 0x01) {
-        if ((esp_timer_get_time() / 1000 - start) > 500) return 65535;
+    while ((vl53l0x_read_reg(RESULT_INTERRUPT_STATUS_GPIO) & 0x04) == 0) {
+        if ((esp_timer_get_time() / 1000 - start) > 500) {
+            ESP_LOGW(TAG, "VL6180X read timeout");
+            return 65535;
+        }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
-    
-    // Wait for result interrupt
-    start = esp_timer_get_time() / 1000;
-    while ((vl53l0x_read_reg(RESULT_INTERRUPT_STATUS) & 0x07) == 0) {
-        if ((esp_timer_get_time() / 1000 - start) > 500) return 65535;
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    
-    // Read range from RESULT_RANGE_STATUS + 10 (register 0x1E)
-    uint16_t range = vl53l0x_read_reg16(RESULT_RANGE_STATUS + 10);
-    
-    // Clear interrupt
-    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x01);
-    
+
+    uint8_t range = vl53l0x_read_reg(RESULT_RANGE_VAL);
+    vl53l0x_write_reg(SYSTEM_INTERRUPT_CLEAR, 0x07);
     return range;
 }
 
@@ -3091,26 +2946,26 @@ static void sensor_task(void *pvParameters)
     
     vTaskDelay(pdMS_TO_TICKS(500));  // Give time to read logs
     
-    // Try to initialize VL53L0X sensor (real hardware)
+    // Try to initialize VL6150X/VL6180X sensor (real hardware)
     bool sensor_available = false;
     
-    ESP_LOGI(TAG, "🔧 Attempting VL53L0X sensor detection...");
+    ESP_LOGI(TAG, "🔧 Attempting TOF sensor detection...");
     if (vl53l0x_sensor_ready()) {
         ESP_LOGI(TAG, "✅ Sensor detected! Now initializing...");
         // Attempt full initialization sequence
         esp_err_t init_result = vl53l0x_init();
         if (init_result == ESP_OK) {
             sensor_available = true;
-            ESP_LOGI(TAG, "✅ VL53L0X sensor initialized and ready!");
+            ESP_LOGI(TAG, "✅ TOF sensor initialized and ready!");
             vTaskDelay(pdMS_TO_TICKS(100));  // Wait for first measurement
         } else {
             ESP_LOGE(TAG, "❌ Sensor detected but init FAILED (code %d) - using simulation", init_result);
         }
     } else {
-        ESP_LOGE(TAG, "⚠️  VL53L0X sensor NOT DETECTED - EMERGENCY STOP");
+        ESP_LOGE(TAG, "⚠️  TOF sensor NOT DETECTED - EMERGENCY STOP");
         ESP_LOGE(TAG, "   If the I2C scan did not show 0x29, verify wiring, pull-ups and sensor power.");
         xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-        trigger_emergency_stop("VL53L0X sensor not detected");
+        trigger_emergency_stop("TOF sensor not detected");
         xSemaphoreGive(sys_state_mutex);
     }
     
@@ -3296,6 +3151,7 @@ static void valve_task(void *pvParameters)
     uint64_t last_no_progress_log_ms = 0;
     bool filling = false;
     bool manual_mode = false;
+    uint16_t last_distance_cm = 0;
     uint16_t progress_reference_distance = 0;
     uint16_t progress_candidate_distance = 0;
     uint8_t progress_confirmation_count = 0;
@@ -3329,6 +3185,7 @@ static void valve_task(void *pvParameters)
             manual_mode = false;
             last_progress_time_ms = 0;
             last_no_progress_log_ms = 0;
+            last_distance_cm = 0;
             progress_reference_distance = 0;
             progress_candidate_distance = 0;
             progress_confirmation_count = 0;
@@ -3343,6 +3200,7 @@ static void valve_task(void *pvParameters)
             manual_mode = false;
             last_progress_time_ms = 0;
             last_no_progress_log_ms = 0;
+            last_distance_cm = 0;
             progress_reference_distance = 0;
             progress_candidate_distance = 0;
             progress_confirmation_count = 0;
@@ -3359,6 +3217,7 @@ static void valve_task(void *pvParameters)
             begin_valve_session(fill_start_time_ms, true);
             progress_reference_distance = state_snapshot.sensor_distance_cm;
             progress_candidate_distance = state_snapshot.sensor_distance_cm;
+            last_distance_cm = state_snapshot.sensor_distance_cm;
             progress_confirmation_count = 0;
             ESP_LOGI(TAG, "🚰 Valve OPENED - manual fill requested");
         }
@@ -3375,6 +3234,7 @@ static void valve_task(void *pvParameters)
                         manual_mode = false;
                         last_progress_time_ms = 0;
                         last_no_progress_log_ms = 0;
+                        last_distance_cm = 0;
                         progress_reference_distance = 0;
                         progress_candidate_distance = 0;
                         progress_confirmation_count = 0;
@@ -3398,6 +3258,7 @@ static void valve_task(void *pvParameters)
             begin_valve_session(fill_start_time_ms, false);
             progress_reference_distance = state_snapshot.sensor_distance_cm;
             progress_candidate_distance = state_snapshot.sensor_distance_cm;
+            last_distance_cm = state_snapshot.sensor_distance_cm;
             progress_confirmation_count = 0;
             ESP_LOGI(TAG, "🚰 Valve OPENED - Tank is EMPTY (below UNTEN threshold) - FILLING STARTED");
         }
@@ -3407,7 +3268,7 @@ static void valve_task(void *pvParameters)
             uint64_t now_ms = esp_timer_get_time() / 1000;
             uint16_t current_distance = state_snapshot.sensor_distance_cm;
 
-            if (current_distance + FILL_PROGRESS_MIN_DELTA_CM <= progress_reference_distance) {
+            if (last_distance_cm > 0 && current_distance + FILL_PROGRESS_MIN_DELTA_CM <= last_distance_cm) {
                 if (current_distance < progress_candidate_distance) {
                     progress_candidate_distance = current_distance;
                 }
@@ -3415,49 +3276,56 @@ static void valve_task(void *pvParameters)
                     progress_confirmation_count++;
                 }
 
+                // Any real decrease in measured distance resets the progress timeout.
+                last_progress_time_ms = now_ms;
+                last_no_progress_log_ms = now_ms;
+
                 if (progress_confirmation_count >= FILL_PROGRESS_CONFIRM_SAMPLES) {
                     progress_reference_distance = progress_candidate_distance;
-                    last_progress_time_ms = now_ms;
-                    last_no_progress_log_ms = now_ms;
+                    progress_candidate_distance = progress_reference_distance;
                     progress_confirmation_count = 0;
                     ESP_LOGI(TAG, "📉 Fill progress confirmed: %u cm", progress_reference_distance);
                 }
-            } else if ((now_ms - last_progress_time_ms) > state_snapshot.fill_progress_timeout_ms) {
-                gpio_set_level(GPIO_VALVE_CONTROL, 0);
-                set_valve_and_manual_state(false, false);
-                trigger_emergency_stop(manual_mode
-                    ? "No fill progress during manual fill: distance did not decrease sufficiently within timeout"
-                    : "No fill progress: distance did not decrease sufficiently within timeout");
-                finalize_active_valve_session(now_ms);
-                filling = false;
-                manual_mode = false;
-                last_progress_time_ms = 0;
-                last_no_progress_log_ms = 0;
-                progress_reference_distance = 0;
-                progress_candidate_distance = 0;
-                progress_confirmation_count = 0;
-                ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", sys_state.emergency_stop_reason);
-                last_tank_state = current_tank_state;
-                vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
-                continue;
-            } else if ((now_ms - last_no_progress_log_ms) >= 1000) {
-                uint64_t stalled_ms = now_ms - last_progress_time_ms;
-                uint64_t remaining_ms = (stalled_ms >= state_snapshot.fill_progress_timeout_ms)
-                    ? 0
-                    : (state_snapshot.fill_progress_timeout_ms - stalled_ms);
-                ESP_LOGW(TAG,
-                    "⏳ No fill progress (%s): current=%u cm ref=%u cm stalled=%llu ms remaining=%llu ms",
-                    manual_mode ? "manual" : "auto",
-                    current_distance,
-                    progress_reference_distance,
-                    (unsigned long long)stalled_ms,
-                    (unsigned long long)remaining_ms);
-                last_no_progress_log_ms = now_ms;
             } else {
-                progress_candidate_distance = progress_reference_distance;
-                progress_confirmation_count = 0;
+                if (current_distance < progress_candidate_distance) {
+                    progress_candidate_distance = current_distance;
+                }
+
+                if ((now_ms - last_progress_time_ms) > state_snapshot.fill_progress_timeout_ms) {
+                    gpio_set_level(GPIO_VALVE_CONTROL, 0);
+                    set_valve_and_manual_state(false, false);
+                    trigger_emergency_stop(manual_mode
+                        ? "No fill progress during manual fill: distance did not decrease sufficiently within timeout"
+                        : "No fill progress: distance did not decrease sufficiently within timeout");
+                    finalize_active_valve_session(now_ms);
+                    filling = false;
+                    manual_mode = false;
+                    last_progress_time_ms = 0;
+                    last_no_progress_log_ms = 0;
+                    progress_reference_distance = 0;
+                    progress_candidate_distance = 0;
+                    progress_confirmation_count = 0;
+                    ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", sys_state.emergency_stop_reason);
+                    last_tank_state = current_tank_state;
+                    vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
+                    continue;
+                } else if ((now_ms - last_no_progress_log_ms) >= 1000) {
+                    uint64_t stalled_ms = now_ms - last_progress_time_ms;
+                    uint64_t remaining_ms = (stalled_ms >= state_snapshot.fill_progress_timeout_ms)
+                        ? 0
+                        : (state_snapshot.fill_progress_timeout_ms - stalled_ms);
+                    ESP_LOGW(TAG,
+                        "⏳ No fill progress (%s): current=%u cm ref=%u cm stalled=%llu ms remaining=%llu ms",
+                        manual_mode ? "manual" : "auto",
+                        current_distance,
+                        progress_reference_distance,
+                        (unsigned long long)stalled_ms,
+                        (unsigned long long)remaining_ms);
+                    last_no_progress_log_ms = now_ms;
+                }
             }
 
+            last_distance_cm = current_distance;
             uint64_t elapsed_ms = now_ms - fill_start_time_ms;
             if (elapsed_ms > state_snapshot.timeout_max) {
                 gpio_set_level(GPIO_VALVE_CONTROL, 0);  // Close valve
@@ -3470,6 +3338,7 @@ static void valve_task(void *pvParameters)
                 progress_reference_distance = 0;
                 progress_candidate_distance = 0;
                 progress_confirmation_count = 0;
+                last_distance_cm = 0;
                 ESP_LOGW(TAG, "⚠️  TIMEOUT! Valve CLOSED - fill time exceeded %d ms", 
                         state_snapshot.timeout_max);
                 // Note: Not calling emergency stop, just safety closure

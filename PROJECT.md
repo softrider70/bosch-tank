@@ -29,7 +29,7 @@ components:
   - name: driver (uart, i2c, gpio)
   
 external_dependencies:
-  - VL53L0X (ToF sensor driver - IIC)
+  - VL6150X/VL6180X-compatible ToF sensor driver (I2C)
   - MOSFET control circuit (GPIO-based PWM/digital)
 
 security:
@@ -44,13 +44,13 @@ hardware:
   power: 5V USB + 12V externe Versorgung
   
   pin_mapping:
-    i2c_sda: 21              # VL53L0X Sensor
-    i2c_scl: 22              # VL53L0X Sensor
+    i2c_sda: 21              # VL6150X/VL6180X-compatible ToF sensor
+    i2c_scl: 22              # VL6150X/VL6180X-compatible ToF sensor
     valve_control: 32        # externer Transistor zur Ventilsteuerung (nur Bosch)
     status_led: 2            # Onboard LED
   
   external_peripherals:
-    - VL53L0X Time-of-Flight Sensor (I2C address 0x29)
+    - VL6150X/VL6180X-compatible Time-of-Flight Sensor (I2C address 0x29)
     - 12V Solenoid Valve (via MOSFET module)
     - 5V Power Supply Module
 

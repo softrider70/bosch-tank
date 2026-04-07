@@ -8,7 +8,7 @@
  * bosch-tank Configuration Header
  * 
  * Wassertank-Managementsystem für Kaffeemaschinen
- * Hardware: ESP32-DEVKITC-V4 mit VL53L0X ToF-Sensor + 12V Solenoid Ventil
+ * Hardware: ESP32-DEVKITC-V4 mit VL6150X/VL6180X-kompatiblen ToF-Sensor + 12V Solenoid Ventil
  */
 
 // ============================================================================
@@ -16,13 +16,13 @@
 // ============================================================================
 
 #define GPIO_LED_STATUS     2       // Onboard LED (Status-Anzeige)
-#define GPIO_I2C_SDA        21      // VL53L0X Sensor (Data)
-#define GPIO_I2C_SCL        22      // VL53L0X Sensor (Clock)
+#define GPIO_I2C_SDA        21      // ToF-Sensor SDA (Data)
+#define GPIO_I2C_SCL        22      // ToF-Sensor SCL (Clock)
 #define GPIO_VALVE_CONTROL  32      // GPIO für externen Transistor zur Ventilsteuerung
 #define GPIO_TOUCH_KEY      33      // Touch-Key T8 fuer manuelles Befuellen (nur ESP32 classic)
 
 // ============================================================================
-// I2C Configuration (VL53L0X)
+// I2C Configuration (TOF Sensor)
 // ============================================================================
 
 #define I2C_MASTER_PORT     I2C_NUM_0           // I2C Port 0
@@ -33,7 +33,7 @@
 #define I2C_MASTER_TX_BUF   0
 #define I2C_TIMEOUT_MS      10000               // 10s timeout
 
-#define VL53L0X_ADDR        0x29                // Standard I2C address
+#define TOF_SENSOR_ADDR     0x29                // Standard I2C address for VL6150X/VL6180X-compatible TOF sensors
 
 // ============================================================================
 // Sensor Configuration (Distance Measurement)
