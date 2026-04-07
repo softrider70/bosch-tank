@@ -96,6 +96,13 @@
 #define NVS_KEY_EMERGENCY_COUNT         "emerg_count"
 #define NVS_KEY_TOTAL_OPEN_TIME_MS      "open_time_ms"
 #define NVS_KEY_TOTAL_LITERS_CENTI      "tot_liters_cl"
+#define NVS_KEY_OTA_LAST_RESULT_OK      "ota_last_ok"
+#define NVS_KEY_OTA_PHASE               "ota_phase"
+#define NVS_KEY_OTA_MESSAGE             "ota_message"
+#define NVS_KEY_OTA_LAST_ERROR          "ota_last_error"
+#define NVS_KEY_OTA_CURRENT_VERSION     "ota_current_version"
+#define NVS_KEY_OTA_TARGET_VERSION      "ota_target_version"
+#define NVS_KEY_OTA_URL                 "ota_url"
 #define NVS_KEY_EMERGENCY_STOP          "emerg_stop"
 #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
 #define NVS_KEY_ERROR_LOG               "error_log"
@@ -110,10 +117,10 @@
 // ============================================================================
 
 #define WIFI_SSID_AP_MODE               "bosch-tank-setup"    // AP-Modus SSID
-#define WIFI_PASS_AP_MODE               "password"              // AP-Modus Password (simple, ASCII)
+#define WIFI_PASS_AP_MODE               ""                      // AP-Modus Password (empty for open AP)
 #define WIFI_CHANNEL_AP                 6                        // Less congestion than channel 1
 #define WIFI_MAX_CONN_AP                8                        // Increased from 4 to 8
-#define WIFI_AUTH_AP                    WIFI_AUTH_WPA2_PSK
+#define WIFI_AUTH_AP                    WIFI_AUTH_OPEN
 #define WIFI_BEACON_INTERVAL_AP         100                      // 100ms beacon interval (stable AP broadcast)
 
 // WiFi-Verbindungs-Timeout

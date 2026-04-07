@@ -1,0 +1,491 @@
+diff --git a/components/main/main.c b/components/main/main.c
+index b800d86..8342fbf 100644
+--- a/components/main/main.c
++++ b/components/main/main.c
+@@ -126,6 +126,9 @@ static system_state_t sys_state = {
+     .last_update_timestamp = 0
+ };
+ 
++static bool nvs_initialized = false;
++
++
+ // Mutex for sys_state access
+ static SemaphoreHandle_t sys_state_mutex = NULL;
+ static SemaphoreHandle_t wifi_state_mutex = NULL;
+@@ -292,6 +295,7 @@ static esp_err_t init_nvs(void)
+         ESP_LOGI(TAG, "Loaded emergency_stop_active from NVS: %d", sys_state.emergency_stop_active);
+     }
+     
++    nvs_initialized = true;
+     ESP_LOGI(TAG, "NVS initialized successfully");
+     return ESP_OK;
+ }
+@@ -642,6 +646,84 @@ static void get_ota_state_snapshot(ota_state_t *snapshot)
+     xSemaphoreGive(ota_state_mutex);
+ }
+ 
++static void save_ota_state_to_nvs(void)
++{
++    if (!nvs_initialized) {
++        return;
++    }
++
++    ota_state_t snapshot;
++    xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
++    snapshot = ota_state;
++    xSemaphoreGive(ota_state_mutex);
++
++    esp_err_t err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_OTA_LAST_RESULT_OK, snapshot.last_result_ok ? 1 : 0);
++    if (err == ESP_OK) err = nvs_set_str(sys_state.nvs_handle, NVS_KEY_OTA_PHASE, snapshot.phase);
++    if (err == ESP_OK) err = nvs_set_str(sys_state.nvs_handle, NVS_KEY_OTA_MESSAGE, snapshot.message);
++    if (err == ESP_OK) err = nvs_set_str(sys_state.nvs_handle, NVS_KEY_OTA_LAST_ERROR, snapshot.last_error);
++    if (err == ESP_OK) err = nvs_set_str(sys_state.nvs_handle, NVS_KEY_OTA_CURRENT_VERSION, snapshot.current_version);
++    if (err == ESP_OK) err = nvs_set_str(sys_state.nvs_handle, NVS_KEY_OTA_TARGET_VERSION, snapshot.target_version);
++    if (err == ESP_OK) err = nvs_set_str(sys_state.nvs_handle, NVS_KEY_OTA_URL, snapshot.url);
++    if (err == ESP_OK) err = nvs_commit(sys_state.nvs_handle);
++
++    if (err != ESP_OK) {
++        ESP_LOGW(TAG, "Failed to save OTA state to NVS: %s", esp_err_to_name(err));
++    }
++}
++
++static void load_ota_state_from_nvs(void)
++{
++    if (!nvs_initialized) {
++        return;
++    }
++
++    ota_state_t snapshot = ota_state;
++    uint32_t stored_ok = 0;
++    size_t len = 0;
++
++    if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_OTA_LAST_RESULT_OK, &stored_ok) == ESP_OK) {
++        snapshot.last_result_ok = stored_ok != 0;
++    }
++
++    len = sizeof(snapshot.phase);
++    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_OTA_PHASE, snapshot.phase, &len) != ESP_OK) {
++        strncpy(snapshot.phase, "IDLE", sizeof(snapshot.phase) - 1);
++        snapshot.phase[sizeof(snapshot.phase) - 1] = '\0';
++    }
++
++    len = sizeof(snapshot.message);
++    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_OTA_MESSAGE, snapshot.message, &len) != ESP_OK) {
++        strncpy(snapshot.message, "Kein OTA gestartet", sizeof(snapshot.message) - 1);
++        snapshot.message[sizeof(snapshot.message) - 1] = '\0';
++    }
++
++    len = sizeof(snapshot.last_error);
++    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_OTA_LAST_ERROR, snapshot.last_error, &len) != ESP_OK) {
++        snapshot.last_error[0] = '\0';
++    }
++
++    len = sizeof(snapshot.current_version);
++    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_OTA_CURRENT_VERSION, snapshot.current_version, &len) != ESP_OK) {
++        snapshot.current_version[0] = '\0';
++    }
++
++    len = sizeof(snapshot.target_version);
++    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_OTA_TARGET_VERSION, snapshot.target_version, &len) != ESP_OK) {
++        snapshot.target_version[0] = '\0';
++    }
++
++    len = sizeof(snapshot.url);
++    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_OTA_URL, snapshot.url, &len) != ESP_OK) {
++        snapshot.url[0] = '\0';
++    }
++
++    snapshot.in_progress = false;
++
++    xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
++    ota_state = snapshot;
++    xSemaphoreGive(ota_state_mutex);
++}
++
+ static void collect_cpu_runtime_stats(uint32_t *core0_percent,
+                                       uint32_t *core1_percent,
+                                       char *top_task,
+@@ -789,7 +871,7 @@ static void stack_monitor_task(void *pvParameters)
+ 
+ static void persist_runtime_counters_locked(void)
+ {
+-    if (sys_state.nvs_handle == 0) {
++    if (!nvs_initialized) {
+         return;
+     }
+ 
+@@ -1579,7 +1661,8 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
+     char escaped_error[(sizeof(snapshot.last_error) * 2) + 1] = {0};
+     char escaped_current_version[(sizeof(snapshot.current_version) * 2) + 1] = {0};
+     char escaped_target_version[(sizeof(snapshot.target_version) * 2) + 1] = {0};
+-    char response[768];
++    char escaped_url[(sizeof(snapshot.url) * 2) + 1] = {0};
++    char response[2048];
+ 
+     get_ota_state_snapshot(&snapshot);
+     json_escape_string(snapshot.phase, escaped_phase, sizeof(escaped_phase));
+@@ -1587,6 +1670,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
+     json_escape_string(snapshot.last_error, escaped_error, sizeof(escaped_error));
+     json_escape_string(snapshot.current_version, escaped_current_version, sizeof(escaped_current_version));
+     json_escape_string(snapshot.target_version, escaped_target_version, sizeof(escaped_target_version));
++    json_escape_string(snapshot.url, escaped_url, sizeof(escaped_url));
+ 
+     snprintf(response, sizeof(response),
+         "{\"status\":\"%s\",\"ota\":{"
+@@ -1597,6 +1681,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
+         "\"last_error\":\"%s\","
+         "\"current_version\":\"%s\","
+         "\"target_version\":\"%s\","
++        "\"url\":\"%s\","
+         "\"last_start_ms\":%llu,"
+         "\"last_end_ms\":%llu"
+         "}}",
+@@ -1608,6 +1693,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
+         escaped_error,
+         escaped_current_version,
+         escaped_target_version,
++        escaped_url,
+         (unsigned long long)snapshot.last_start_ms,
+         (unsigned long long)snapshot.last_end_ms);
+ 
+@@ -1670,6 +1756,7 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
+     strncpy(ota_state.url, url, sizeof(ota_state.url) - 1);
+     ota_state.last_start_ms = (uint64_t)(esp_timer_get_time() / 1000);
+     xSemaphoreGive(ota_state_mutex);
++    save_ota_state_to_nvs();
+ 
+     BaseType_t created = xTaskCreatePinnedToCore(
+         ota_update_task,
+@@ -1794,6 +1881,7 @@ static void ota_update_task(void *pvParameters)
+ 
+         ESP_LOGI(TAG, "Ô£à OTA successful, restarting device");
+         ota_task_handle = NULL;
++        save_ota_state_to_nvs();
+         free(url);
+         vTaskDelay(pdMS_TO_TICKS(1000));
+         esp_restart();
+@@ -1812,6 +1900,7 @@ static void ota_update_task(void *pvParameters)
+     strncpy(ota_state.last_error, esp_err_to_name(err), sizeof(ota_state.last_error) - 1);
+     ota_state.last_end_ms = (uint64_t)(esp_timer_get_time() / 1000);
+     xSemaphoreGive(ota_state_mutex);
++    save_ota_state_to_nvs();
+ 
+     ota_task_handle = NULL;
+     free(url);
+@@ -2240,10 +2329,20 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
+ <div class="status-row"><span>In Arbeit:</span><span id="ota-in-progress">-</span></div>
+ <div class="status-row"><span>Aktuelle Version:</span><span id="ota-current-version">-</span></div>
+ <div class="status-row"><span>Zielversion:</span><span id="ota-target-version">-</span></div>
++<div class="status-row"><span>OTA-Quelle:</span><span id="ota-url">-</span></div>
+ <div class="status-row"><span>Letztes Ergebnis:</span><span id="ota-last-result">-</span></div>
+ <div class="status-row"><span>Letzter Fehler:</span><span id="ota-last-error">-</span></div>
+ <div class="status-row"><span>Start seit Boot:</span><span id="ota-last-start">-</span></div>
+ <div class="status-row"><span>Ende seit Boot:</span><span id="ota-last-end">-</span></div>
++<div style="margin-top:12px;padding-top:10px;border-top:1px solid #ddd">
++<p style="font-size:12px;margin:0 0 8px 0"><b>OTA Update starten:</b></p>
++<label for="ota-url-input">OTA URL:</label>
++<input type="text" id="ota-url-input" value="http://192.168.1.191/bosch-tank.bin" placeholder="https://.../firmware.bin" style="width:100%;box-sizing:border-box;margin:6px 0 10px 0; padding:8px; border:1px solid #ddd; border-radius:4px;">
++<div class="buttons">
++<button class="btn-success" id="ota-start-btn" onclick="startOTA()">OTA starten</button>
++<button class="btn-secondary" onclick="loadDiagnostics(true)">Aktualisieren</button>
++</div>
++</div>
+ <div style="margin-top:8px;font-size:11px;color:#6b7280">Hinweis: Doppeltipp auf gruene Reset-Taste startet Sensor-Reinit.</div>
+ <div id="msg-diagnostics" class="msg" style="display:none"></div>
+ </div>
+@@ -2264,6 +2363,7 @@ let resetHoldTriggered = false;
+ let lastResetTapMs = 0;
+ let lastStatusTimestamp = 0;
+ let stagnantStatusCount = 0;
++let otaStartInFlight = false;
+ const DASHBOARD_REFRESH_MS = 350;
+ const DIAGNOSTICS_REFRESH_MS = 2500;
+ function scheduleDashboardRefresh(delay){
+@@ -2284,49 +2384,46 @@ function clearDiagnosticsRefresh(){
+     if(diagnosticsPollTimer) clearTimeout(diagnosticsPollTimer);
+     diagnosticsPollTimer = null;
+ }
+-function loadDiagnostics(force){
+-    if(diagnosticsPollInFlight && !force) return;
+-    diagnosticsPollInFlight = true;
+-    fetch('/api/ota/status?t=' + Date.now(), {cache: 'no-store'})
+-        .then(r => { if(!r.ok) throw new Error('API error: ' + r.status); return r.json(); })
+-        .then(d => {
+-            const ota = d.ota || {};
+-            const statusEl = document.getElementById('ota-status');
+-            const phaseEl = document.getElementById('ota-phase');
+-            const messageEl = document.getElementById('ota-message');
+-            const inProgressEl = document.getElementById('ota-in-progress');
+-            const currentVersionEl = document.getElementById('ota-current-version');
+-            const targetVersionEl = document.getElementById('ota-target-version');
+-            const lastResultEl = document.getElementById('ota-last-result');
+-            const lastErrorEl = document.getElementById('ota-last-error');
+-            const lastStartEl = document.getElementById('ota-last-start');
+-            const lastEndEl = document.getElementById('ota-last-end');
+-            if(statusEl) statusEl.textContent = d.status || '-';
+-            if(phaseEl) phaseEl.textContent = ota.phase || '-';
+-            if(messageEl) messageEl.textContent = ota.message || '-';
+-            if(inProgressEl) inProgressEl.textContent = ota.in_progress ? 'Ja' : 'Nein';
+-            if(currentVersionEl) currentVersionEl.textContent = ota.current_version || '-';
+-            if(targetVersionEl) targetVersionEl.textContent = ota.target_version || '-';
+-            if(lastResultEl) lastResultEl.textContent = ota.last_result_ok ? 'OK' : 'FAIL';
+-            if(lastErrorEl) lastErrorEl.textContent = ota.last_error || '-';
+-            if(lastStartEl) lastStartEl.textContent = ota.last_start_ms ? (Number(ota.last_start_ms) / 1000).toFixed(1) + ' s' : '-';
+-            if(lastEndEl) lastEndEl.textContent = ota.last_end_ms ? (Number(ota.last_end_ms) / 1000).toFixed(1) + ' s' : '-';
+-        })
+-        .catch(e => {
+-            console.error('loadDiagnostics failed:', e);
+-            const msgEl = document.getElementById('msg-diagnostics');
+-            if(msgEl){
+-                msgEl.textContent = 'OTA-Status konnte nicht geladen werden';
+-                msgEl.className = 'msg error';
+-                msgEl.style.display = 'block';
+-            }
+-        })
+-        .finally(() => {
+-            diagnosticsPollInFlight = false;
+-            if(document.getElementById('diagnostics')?.classList.contains('active')){
+-                scheduleDiagnosticsRefresh();
+-            }
+-        });
++function syncOTAControls(){
++    const btn = document.getElementById('ota-start-btn');
++    if(!btn) return;
++    const inProgress = document.getElementById('ota-in-progress')?.textContent === 'Ja';
++    btn.disabled = otaStartInFlight || inProgress;
++    btn.style.opacity = btn.disabled ? '0.6' : '1';
++    btn.textContent = otaStartInFlight ? 'Startet...' : inProgress ? 'OTA laeuft...' : 'OTA starten';
++}
++function startOTA(){
++    const input = document.getElementById('ota-url-input');
++    if(!input) return;
++    const url = input.value.trim();
++    if(!url){
++        showMsg('diagnostics', 'OTA URL fehlt', true);
++        return;
++    }
++    otaStartInFlight = true;
++    syncOTAControls();
++    fetch('/api/ota/start', {
++        method: 'POST',
++        headers: {'Content-Type': 'application/json'},
++        body: JSON.stringify({url})
++    })
++    .then(async r => {
++        const text = await r.text();
++        let data;
++        try { data = JSON.parse(text); } catch (e) { throw new Error(text || e.message); }
++        if (!r.ok || data.status !== 'OK') {
++            throw new Error(data.message || ('HTTP ' + r.status));
++        }
++        showMsg('diagnostics', data.message || 'OTA gestartet', false);
++        loadDiagnostics(true);
++    })
++    .catch(e => {
++        showMsg('diagnostics', 'OTA konnte nicht gestartet werden: ' + e.message, true);
++    })
++    .finally(() => {
++        otaStartInFlight = false;
++        syncOTAControls();
++    });
+ }
+ function syncSaveButton(){
+     const btn = document.getElementById('save-btn');
+@@ -2508,16 +2605,18 @@ function updateDashboard(force){
+     const sensors = d.sensors || {};
+     const valve = d.valve || {};
+     const system = d.system || {};
+-    isTankFull = !!sensors.tank_full;
+     const timestamp = Number(d.timestamp || 0);
++    const lv = sensors.tank_level_cm || 0;
++    const full = Math.max(0, Math.min(100, Number((sensors.fill_percent ?? sensors.tank_full) || 0)));
++    isTankFull = (typeof sensors.tank_full !== 'undefined' && sensors.tank_full !== null)
++        ? (Number(sensors.tank_full) === 1)
++        : (full >= 100);
+     if(timestamp > 0 && timestamp === lastStatusTimestamp){
+         stagnantStatusCount++;
+     } else {
+         stagnantStatusCount = 0;
+         lastStatusTimestamp = timestamp;
+     }
+-    const lv = sensors.tank_level_cm || 0;
+-        const full = Math.max(0, Math.min(100, Number((sensors.fill_percent ?? sensors.tank_full) || 0)));
+     document.getElementById('level').textContent = lv;
+     document.getElementById('percent').textContent = full.toFixed(0) + '%';
+     document.getElementById('bar-fill').style.width = full + '%';
+@@ -2567,6 +2666,57 @@ function updateDashboard(force){
+         scheduleDashboardRefresh(DASHBOARD_REFRESH_MS);
+     });
+ }
++function loadDiagnostics(force){
++    if(diagnosticsPollInFlight && !force) return;
++    diagnosticsPollInFlight = true;
++    fetch('/api/ota/status?t=' + Date.now(), {cache: 'no-store'})
++        .then(r => { if(!r.ok) throw new Error('API error: ' + r.status); return r.json(); })
++        .then(d => {
++            const ota = d.ota || {};
++            const statusEl = document.getElementById('ota-status');
++            const phaseEl = document.getElementById('ota-phase');
++            const messageEl = document.getElementById('ota-message');
++            const inProgressEl = document.getElementById('ota-in-progress');
++            const currentVersionEl = document.getElementById('ota-current-version');
++            const targetVersionEl = document.getElementById('ota-target-version');
++            const urlEl = document.getElementById('ota-url');
++            const lastResultEl = document.getElementById('ota-last-result');
++            const lastErrorEl = document.getElementById('ota-last-error');
++            const lastStartEl = document.getElementById('ota-last-start');
++            const lastEndEl = document.getElementById('ota-last-end');
++            if(statusEl) statusEl.textContent = d.status || '-';
++            if(phaseEl) phaseEl.textContent = ota.phase || '-';
++            if(messageEl) messageEl.textContent = ota.message || '-';
++            if(inProgressEl) inProgressEl.textContent = ota.in_progress ? 'Ja' : 'Nein';
++            if(currentVersionEl) currentVersionEl.textContent = ota.current_version || '-';
++            if(targetVersionEl) targetVersionEl.textContent = ota.target_version || '-';
++            if(urlEl) urlEl.textContent = ota.url || '-';
++            if(lastResultEl) lastResultEl.textContent = ota.last_result_ok ? 'OK' : 'FAIL';
++            if(lastErrorEl) lastErrorEl.textContent = ota.last_error || '-';
++            if(lastStartEl) lastStartEl.textContent = ota.last_start_ms ? (Number(ota.last_start_ms) / 1000).toFixed(1) + ' s' : '-';
++            if(lastEndEl) lastEndEl.textContent = ota.last_end_ms ? (Number(ota.last_end_ms) / 1000).toFixed(1) + ' s' : '-';
++        })
++        .catch(e => {
++            console.error('loadDiagnostics failed:', e);
++            const diagnosticsTab = document.getElementById('diagnostics');
++            if (diagnosticsTab && diagnosticsTab.classList.contains('active')) {
++                const msgEl = document.getElementById('msg-diagnostics');
++                if(msgEl){
++                    msgEl.textContent = 'OTA-Status konnte nicht geladen werden';
++                    msgEl.className = 'msg error';
++                    msgEl.style.display = 'block';
++                }
++            }
++        })
++        .finally(() => {
++            diagnosticsPollInFlight = false;
++            if(document.getElementById('diagnostics')?.classList.contains('active')){
++                scheduleDiagnosticsRefresh();
++            }
++            syncOTAControls();
++        });
++}
++
+ function fill(){if(isEmergencyActive){showMsg('dashboard', 'Notaus aktiv - erst RESET ausfuehren', true); return;} const nextAction = isFilling ? 'close' : 'open'; fetch('/api/valve/manual', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: nextAction})}).then(r => r.json()).then(d => {isFilling = !!d.manual_fill_active; syncFillButton(); updateDashboard(true); if(d.message) showMsg('dashboard', d.message, false);}).catch(() => updateDashboard(true));}
+ function stop(){fetch('/api/valve/stop', {method: 'POST'}).then(() => {isFilling = false; updateDashboard(true); showMsg('dashboard', 'Ventil geschlossen', false);});}
+ function resetEmergency(){if(!isEmergencyActive){if(resetHoldTriggered) return; const now = Date.now(); const isDoubleTap = (now - lastResetTapMs) <= 450; lastResetTapMs = now; if(isDoubleTap){resetSensor(); return;} if(hasStickyWarning){resetWarnings(); return;} showMsg('dashboard', 'Doppeltipp: Sensor-Reinit | 3 Sekunden halten: Zaehler-Reset', false); return;} fetch('/api/emergency_stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset'})}).then(r => r.json()).then(d => {updateDashboard(true); document.getElementById('emergency-reason').style.display = 'none'; showMsg('dashboard', d.message || 'Reset ausgefuehrt', false);}).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
+@@ -3051,7 +3201,9 @@ static void sensor_task(void *pvParameters)
+     
+     // Try to initialize VL53L0X sensor (real hardware)
+     bool sensor_available = false;
+-    
++    bool sensor_simulation_mode = false;
++    uint16_t simulated_distance_mm = (uint16_t)(sys_state.threshold_bottom * 10);
++
+     ESP_LOGI(TAG, "­ƒöº Attempting VL53L0X sensor detection...");
+     if (vl53l0x_sensor_ready()) {
+         ESP_LOGI(TAG, "Ô£à Sensor detected! Now initializing...");
+@@ -3063,15 +3215,20 @@ static void sensor_task(void *pvParameters)
+             vTaskDelay(pdMS_TO_TICKS(100));  // Wait for first measurement
+         } else {
+             ESP_LOGE(TAG, "ÔØî Sensor detected but init FAILED (code %d) - using simulation", init_result);
++            sensor_simulation_mode = true;
+         }
+     } else {
+-        ESP_LOGE(TAG, "ÔÜá´©Å  VL53L0X sensor NOT DETECTED - EMERGENCY STOP");
++        ESP_LOGW(TAG, "ÔÜá´©Å  VL53L0X sensor NOT DETECTED - entering simulation mode");
++        sensor_simulation_mode = true;
++    }
++
++    if (!sensor_available && !sensor_simulation_mode) {
+         xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+         trigger_emergency_stop("VL53L0X sensor not detected");
+         xSemaphoreGive(sys_state_mutex);
+     }
+-    
+-    ESP_LOGI(TAG, "­ƒÜÇ Sensor mode: %s", sensor_available ? "REAL HARDWARE" : "EMERGENCY (no sensor)");
++
++    ESP_LOGI(TAG, "­ƒÜÇ Sensor mode: %s", sensor_available ? "REAL HARDWARE" : (sensor_simulation_mode ? "SIMULATION (no sensor)" : "EMERGENCY (no sensor)"));
+     
+     uint16_t distance_samples[SENSOR_SAMPLES] = {0};
+     int sample_idx = 0;
+@@ -3113,7 +3270,7 @@ static void sensor_task(void *pvParameters)
+             }
+         }
+ 
+-        if (!sensor_available) {
++        if (!sensor_available && !sensor_simulation_mode) {
+             uint64_t now_ms = esp_timer_get_time() / 1000;
+             if (last_auto_reinit_ms == 0 || (now_ms - last_auto_reinit_ms) >= SENSOR_AUTO_REINIT_COOLDOWN_MS) {
+                 sensor_reinit_requested = true;
+@@ -3177,6 +3334,34 @@ static void sensor_task(void *pvParameters)
+                     ESP_LOGE(TAG, "­ƒÜ¿ EMERGENCY STOP - %s", state_snapshot.emergency_stop_reason);
+                 }
+             }
++        } else if (sensor_simulation_mode) {
++            // Simulated sensor output for systems without a physical VL53L0X
++            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
++            bool valve_open = sys_state.valve_state;
++            float flow_rate_l_per_min = sys_state.flow_rate_l_per_min;
++            xSemaphoreGive(sys_state_mutex);
++
++            if (valve_open && simulated_distance_mm > 0) {
++                uint32_t delta_mm = (uint32_t)(flow_rate_l_per_min * 0.05f);
++                if (delta_mm < 2) {
++                    delta_mm = 2;
++                }
++                if (delta_mm > simulated_distance_mm) {
++                    simulated_distance_mm = 0;
++                } else {
++                    simulated_distance_mm -= (uint16_t)delta_mm;
++                }
++            }
++
++            distance_mm = simulated_distance_mm;
++            if (distance_mm > 4000) {
++                distance_mm = 4000;
++            }
++
++            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
++            sys_state.sensor_last_raw_mm = distance_mm;
++            sys_state.sensor_data_stale = false;
++            xSemaphoreGive(sys_state_mutex);
+         } else {
+             // No sensor - emergency already triggered
+             vTaskDelay(pdMS_TO_TICKS(TASK_SENSOR_INTERVAL_MS));
+@@ -3768,6 +3953,7 @@ void app_main(void)
+         return;
+     }
+     ESP_LOGI(TAG, "   Ô£ô sys_state mutex created");
++    load_ota_state_from_nvs();
+     
+     ESP_LOGI(TAG, "   ÔåÆ Testing I2C init...");
+     ret = init_i2c();
+diff --git a/include/config.h b/include/config.h
+index b9edc4c..5148954 100644
+--- a/include/config.h
++++ b/include/config.h
+@@ -96,6 +96,13 @@
+ #define NVS_KEY_EMERGENCY_COUNT         "emerg_count"
+ #define NVS_KEY_TOTAL_OPEN_TIME_MS      "open_time_ms"
+ #define NVS_KEY_TOTAL_LITERS_CENTI      "tot_liters_cl"
++#define NVS_KEY_OTA_LAST_RESULT_OK      "ota_last_ok"
++#define NVS_KEY_OTA_PHASE               "ota_phase"
++#define NVS_KEY_OTA_MESSAGE             "ota_message"
++#define NVS_KEY_OTA_LAST_ERROR          "ota_last_error"
++#define NVS_KEY_OTA_CURRENT_VERSION     "ota_current_version"
++#define NVS_KEY_OTA_TARGET_VERSION      "ota_target_version"
++#define NVS_KEY_OTA_URL                 "ota_url"
+ #define NVS_KEY_EMERGENCY_STOP          "emerg_stop"
+ #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
+ #define NVS_KEY_ERROR_LOG               "error_log"
+@@ -110,10 +117,10 @@
+ // ============================================================================
+ 
+ #define WIFI_SSID_AP_MODE               "bosch-tank-setup"    // AP-Modus SSID
+-#define WIFI_PASS_AP_MODE               "password"              // AP-Modus Password (simple, ASCII)
++#define WIFI_PASS_AP_MODE               ""                      // AP-Modus Password (empty for open AP)
+ #define WIFI_CHANNEL_AP                 6                        // Less congestion than channel 1
+ #define WIFI_MAX_CONN_AP                8                        // Increased from 4 to 8
+-#define WIFI_AUTH_AP                    WIFI_AUTH_WPA2_PSK
++#define WIFI_AUTH_AP                    WIFI_AUTH_OPEN
+ #define WIFI_BEACON_INTERVAL_AP         100                      // 100ms beacon interval (stable AP broadcast)
+ 
+ // WiFi-Verbindungs-Timeout
