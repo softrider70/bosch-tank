@@ -22,7 +22,7 @@ The template auto-supports 5 ESP32 variants:
 ## Workflow
 ```
 1. Code change
-2. /build-project       (compile)
+2. /build-project       (compile and commit build metadata)
 3. /upload-firmware     (fast upload)
 4. (watch output)
 5. /commit              (save to git)

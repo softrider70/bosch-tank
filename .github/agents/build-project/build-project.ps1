@@ -17,30 +17,22 @@ $target = "esp32"  # Could be detected from existing sdkconfig
 Write-Host "🔨 Building ${PROJECT_NAME}..." -ForegroundColor Cyan
 Write-Host "Target: $target" -ForegroundColor Gray
 
-# Run build
-$buildOutput = & idf.py build 2>&1
+# Run build and commit metadata if successful
+$scriptPath = Join-Path $ProjectPath "tools\build-and-commit.ps1"
+if (-not (Test-Path $scriptPath)) {
+    Write-Host "❌ Build wrapper not found: $scriptPath" -ForegroundColor Red
+    exit 1
+}
+
+$buildOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $scriptPath 2>&1
 $buildExitCode = $LASTEXITCODE
 
 if ($buildExitCode -eq 0) {
-    Write-Host "✅ Build successful!" -ForegroundColor Green
-    
-    # Show binary size
-    $binaryPath = Join-Path $ProjectPath "build" "${PROJECT_NAME}.bin"
-    if (Test-Path $binaryPath) {
-        $size = (Get-Item $binaryPath).Length / 1024
-        Write-Host "📦 Binary size: $([Math]::Round($size, 2)) KB" -ForegroundColor Green
-        Write-Host "📍 Location: $binaryPath" -ForegroundColor Gray
-    }
-    
-    Write-Host ""
-    Write-Host "Next steps:" -ForegroundColor Cyan
-    Write-Host "  /upload           — Smart upload (asks: first time or update?)" -ForegroundColor Yellow
-    Write-Host "  /upload-firmware  — Fast app-only upload (~3 seconds)" -ForegroundColor Yellow
-    Write-Host "  /initial-upload   — Full bootloader+partition+app (~20 seconds, 1st time only)" -ForegroundColor Yellow
+    Write-Host "✅ Build and commit process completed successfully!" -ForegroundColor Green
 } else {
-    Write-Host "❌ Build failed!" -ForegroundColor Red
+    Write-Host "❌ Build and commit failed!" -ForegroundColor Red
     Write-Host ""
-    Write-Host "Build output:" -ForegroundColor Red
+    Write-Host "Output:" -ForegroundColor Red
     Write-Host $buildOutput
-    exit 1
+    exit $buildExitCode
 }
