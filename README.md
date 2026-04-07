@@ -54,7 +54,7 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
     - WiFi-Credentials
     - Notaus-Status
 - Durchflusswert ist als konfigurierbarer Parameter vorhanden
-- Standardwert fuer Durchfluss: 10.0 L/min
+- Standardwert fuer Durchfluss: 1.0 L/min
 
 ### Web-UI
 
@@ -81,7 +81,7 @@ Diese Punkte kamen explizit aus dem Arbeitschat und werden jetzt als Projektanfo
 
 - App-/Build-Version muss in der UI sichtbar und aus dem Build ableitbar sein
 - Notaus darf sich nicht implizit selbst zuruecksetzen
-- Durchflusswert 10 L/min muss in der Konfiguration vorhanden sein
+- Durchflusswert 1L/min muss in der Konfiguration vorhanden sein
 - Ventil- bzw. Mengenzaehler muessen sichtbar sein
 - Eingaben in der Konfigurationsseite muessen validiert werden
 - Alte, irrefuehrende Parallelimplementierungen duerfen nicht den aktiven Buildpfad verdecken
@@ -160,7 +160,7 @@ Die aktuelle Firmware validiert Konfiguration wie folgt:
 ### Build
 
 ```powershell
-idf.py build
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build-and-commit.ps1
 ```
 
 ### Flash
