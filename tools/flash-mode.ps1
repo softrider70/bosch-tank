@@ -3,7 +3,7 @@ param(
     [ValidateSet("usb", "ota")]
     [string]$Mode,
 
-    [string]$UsbPort = "COM3",
+    [string]$UsbPort = "",
     [string]$DeviceIp = "",
     [string]$HostIp = "",
     [int]$HttpPort = 8070,
@@ -36,6 +36,24 @@ function Get-AutoHostIp {
     return $selected.IPAddress
 }
 
+function Get-AutoUsbPort {
+    $ports = [System.IO.Ports.SerialPort]::GetPortNames() | Sort-Object
+    if ($ports.Count -eq 0) {
+        throw "Keine seriellen Ports gefunden. Bitte -UsbPort explizit setzen."
+    }
+
+    if ($ports.Count -eq 1) {
+        return $ports[0]
+    }
+
+    if ($ports -contains 'COM3') {
+        return 'COM3'
+    }
+
+    Write-Host "Verfügbare serielle Ports: $($ports -join ', ')" -ForegroundColor Yellow
+    throw "Mehrere serielle Ports gefunden. Bitte -UsbPort explizit setzen."
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $repoRoot
 
@@ -43,6 +61,10 @@ $env:ESP_IDF_VERSION = "6.0"
 . .\activate-esp-idf.ps1
 
 if ($Mode -eq "usb") {
+    if ([string]::IsNullOrWhiteSpace($UsbPort)) {
+        $UsbPort = Get-AutoUsbPort
+        Write-Host "[FLASH] Auto-detected USB port: $UsbPort" -ForegroundColor Green
+    }
     Write-Host "[FLASH] Mode=usb, Port=$UsbPort"
     python "$env:IDF_PATH\tools\idf.py" -p $UsbPort flash
     exit $LASTEXITCODE

@@ -166,7 +166,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\build-and-commit.ps1
 ### Flash
 
 ```powershell
-idf.py -p COM3 flash
+idf.py -p <serial port to use> flash
 ```
 
 ### USB/OTA Flash-Umschaltung (empfohlen)
@@ -176,8 +176,10 @@ Das Projekt enthaelt `tools/flash-mode.ps1` fuer einen einheitlichen Workflow.
 USB:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\flash-mode.ps1 -Mode usb -UsbPort COM3
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\flash-mode.ps1 -Mode usb [-UsbPort <serial port>]
 ```
+
+Wenn `-UsbPort` nicht angegeben ist, versucht das Skript automatisch, einen seriellen Port zu erkennen. Bei mehreren gefundenen Ports verwendet es bevorzugt `COM3`, sonst fragt es dich zur Angabe auf.
 
 OTA:
 
@@ -214,7 +216,7 @@ python tools/update_hardware_inventory.py --mac c8:2e:18:f0:36:50 --project CYD 
 ### Monitor
 
 ```powershell
-idf.py -p COM3 monitor
+idf.py -p <serial port to use> monitor
 ```
 
 ## Relevante Dateien
