@@ -43,8 +43,8 @@
 // Sensor sitzt ÜBER dem Tank und misst Abstand zur Wasseroberfläche
 // Logik: Je KLEINER der Abstand, desto VOLLER der Tank
 
-#define TANK_THRESHOLD_TOP_DEFAULT      1       // Abstand wenn Tank VOLL (OBEN-Grenzwert, cm)
-#define TANK_THRESHOLD_BOTTOM_DEFAULT   50      // Abstand wenn Tank LEER (UNTEN-Grenzwert, cm)
+#define TANK_THRESHOLD_TOP_DEFAULT      8       // Abstand wenn Tank VOLL (OBEN-Grenzwert, cm)
+#define TANK_THRESHOLD_BOTTOM_DEFAULT   18      // Abstand wenn Tank LEER (UNTEN-Grenzwert, cm)
 
 // Sensor-Messzyklus
 #define SENSOR_READ_INTERVAL_MS         250     // 250ms = 4 Messungen/Sekunde
@@ -70,7 +70,7 @@
 
 // Füllfortschritt: Während geöffnetem Ventil muss der Sensorabstand kleiner werden
 #define FILL_PROGRESS_MIN_DELTA_CM      1       // Mindestens 1 cm Verringerung
-#define FILL_PROGRESS_TIMEOUT_DEFAULT   5000    // Innerhalb von 5s muss Fortschritt sichtbar sein
+#define FILL_PROGRESS_TIMEOUT_DEFAULT   8000    // Innerhalb von 8s muss Fortschritt sichtbar sein
 #define FILL_PROGRESS_CONFIRM_SAMPLES   3       // Fortschritt erst nach mehreren stabilen Samples bestaetigen
 
 // Ventil-PWM oder Digital

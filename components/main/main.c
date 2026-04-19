@@ -107,7 +107,7 @@ static system_state_t sys_state = {
     .threshold_bottom = TANK_THRESHOLD_BOTTOM_DEFAULT,
     .timeout_max = VALVE_TIMEOUT_MAX_DEFAULT,
     .fill_progress_timeout_ms = FILL_PROGRESS_TIMEOUT_DEFAULT,
-    .flow_rate_l_per_min = 10.0f,  // Default 10 L/min
+    .flow_rate_l_per_min = 1.0f,  // Default 1 L/min
     .sensor_distance_cm = 0,
     .valve_state = false,
     .manual_fill_active = false,
@@ -3236,6 +3236,12 @@ static void valve_task(void *pvParameters)
         if (current_tank_state != last_tank_state) {
             switch (current_tank_state) {
                 case 1:  // Tank FULL
+                    if (state_snapshot.user_fill_halt) {
+                        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                        sys_state.user_fill_halt = false;
+                        xSemaphoreGive(sys_state_mutex);
+                        ESP_LOGI(TAG, "🚰 Auto-fill resume: STOP flag cleared because tank is FULL");
+                    }
                     if (filling) {
                         gpio_set_level(GPIO_VALVE_CONTROL, 0);  // Close valve
                         set_valve_and_manual_state(false, false);
