@@ -209,6 +209,16 @@ Was der OTA-Modus automatisch macht:
 - OTA per API triggern
 - OTA-Status bis Erfolg/Fehler pollen
 
+### Lokaler OTA-Server
+
+Falls du den OTA-Server manuell starten möchtest, kannst du stattdessen auch `tools/serve_bin.py` verwenden:
+
+```powershell
+python tools/serve_bin.py
+```
+
+Dann ist die Firmware unter `http://<host-ip>/bosch-tank.bin` erreichbar und kann direkt in der Web-UI oder per `POST /api/ota/start` verwendet werden.
+
 ## Entwickler-Tools & Wartung
 
 - `tools/flash-mode.ps1`: Vereinheitlichter USB/OTA Flash-Workflow aus dem VS Code Terminal.
@@ -235,6 +245,7 @@ idf.py -p <serial port to use> monitor
 - `include/version.h`: generierte Versionsinformation
 - `partitions_ota_custom.csv`: OTA-optimierte 4MB-Partitionierung (A/B-Slots)
 - `tools/flash-mode.ps1`: USB/OTA Flash-Umschalter fuer VS Code Terminal
+- `tools/serve_bin.py`: Lokaler HTTP-Server zum Ausliefern von `build/bosch-tank.bin` für OTA-Updates
 - `tools/increment_build.py`: Buildnummer-Generierung und `version.h`-Erzeugung
 - `tools/update_hardware_inventory.py`: Hardware-Inventarpflege fuer ESP32-Projekte
 - `PROJECT.md`: kompakte Projektspezifikation auf Basis des aktuellen Stands
