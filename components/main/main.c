@@ -1269,7 +1269,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"cpu_top_task\":\"%s\","
         "\"cpu_top_task_percent\":%lu,"
         "\"cpu_task_count\":%lu,"
-        "\"app_version\":\"%s\","
+        "\"build_number\":%d,"
         "\"api_version\":\"%s\""
         "}"
         "}",
@@ -1306,7 +1306,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         escaped_cpu_top_task,
         (unsigned long)cpu_top_task_percent,
         (unsigned long)cpu_task_count,
-        APP_FULL_VERSION,
+        BUILD_NUMBER,
         API_VERSION
     );
 
@@ -1667,7 +1667,7 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
     strncpy(ota_state.phase, "STARTING", sizeof(ota_state.phase) - 1);
     strncpy(ota_state.message, "OTA wird gestartet", sizeof(ota_state.message) - 1);
     ota_state.last_error[0] = '\0';
-    strncpy(ota_state.current_version, APP_FULL_VERSION, sizeof(ota_state.current_version) - 1);
+    snprintf(ota_state.current_version, sizeof(ota_state.current_version), "Build #%d", BUILD_NUMBER);
     ota_state.target_version[0] = '\0';
     strncpy(ota_state.url, url, sizeof(ota_state.url) - 1);
     ota_state.last_start_ms = (uint64_t)(esp_timer_get_time() / 1000);
@@ -2665,7 +2665,7 @@ function updateDashboard(force){
     document.getElementById('bar-fill').style.width = full + '%';
     syncValveIndicator(valve.state === 'OPEN');
     document.getElementById('status').textContent = d.status;
-        document.getElementById('app-version').textContent = system.app_version ? system.app_version : '-';
+        document.getElementById('app-version').textContent = system.build_number ? 'Build #' + system.build_number : '-';
     document.getElementById('open-count').textContent = Number((valve.trigger_count ?? valve.open_count) || 0).toFixed(0);
     document.getElementById('emergency-count').textContent = Number(valve.emergency_trigger_count || 0).toFixed(0);
     document.getElementById('total-liters').textContent = Number(valve.total_liters || 0).toFixed(2) + ' L';
@@ -3250,6 +3250,7 @@ static void valve_task(void *pvParameters)
     uint16_t progress_candidate_distance = 0;
     uint8_t progress_confirmation_count = 0;
     int last_tank_state = 0;  // 0=unknown, 1=full, 2=filling, 3=empty
+    uint8_t bottom_threshold_confirmation_count = 0;  // Counter für 3 aufeinanderfolgende Messungen unter UNTEN
     
     while (1) {
         // Feed watchdog - CRITICAL for safety
@@ -3260,12 +3261,22 @@ static void valve_task(void *pvParameters)
         int current_tank_state = 0;
         
         // Determine tank state based on sensor readings
-        if (state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top) {
+        // 25cm Sperre: Bei >= 25cm immer CLOSED (Sicherheitslimit)
+        if (state_snapshot.sensor_distance_cm >= 25) {
+            current_tank_state = 0;  // UNKNOWN/SICHERHEITSSPERRE - Ventil bleibt geschlossen
+            bottom_threshold_confirmation_count = 0;  // Counter zurücksetzen
+        } else if (state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top) {
             current_tank_state = 1;  // FULL
+            bottom_threshold_confirmation_count = 0;  // Counter zurücksetzen
         } else if (state_snapshot.sensor_distance_cm >= state_snapshot.threshold_bottom) {
-            current_tank_state = 3;  // EMPTY
+            current_tank_state = 3;  // EMPTY (aber erst nach 3 Messungen öffnen)
+            bottom_threshold_confirmation_count++;
+            if (bottom_threshold_confirmation_count < 3) {
+                current_tank_state = 2;  // Warten auf Bestätigung
+            }
         } else {
             current_tank_state = 2;  // FILLING
+            bottom_threshold_confirmation_count = 0;  // Counter zurücksetzen
         }
 
         if (state_snapshot.manual_fill_active && current_tank_state == 1) {
@@ -3348,7 +3359,7 @@ static void valve_task(void *pvParameters)
             last_tank_state = current_tank_state;
         }
 
-        if (current_tank_state == 3 && !filling && !state_snapshot.emergency_stop_active && !state_snapshot.manual_fill_active && !state_snapshot.user_fill_halt) {
+        if (current_tank_state == 3 && !filling && !state_snapshot.emergency_stop_active && !state_snapshot.manual_fill_active && !state_snapshot.user_fill_halt && state_snapshot.sensor_distance_cm < 25) {
             gpio_set_level(GPIO_VALVE_CONTROL, 1);  // Open valve
             filling = true;
             manual_mode = false;
@@ -3360,13 +3371,32 @@ static void valve_task(void *pvParameters)
             progress_candidate_distance = state_snapshot.sensor_distance_cm;
             last_distance_cm = state_snapshot.sensor_distance_cm;
             progress_confirmation_count = 0;
-            ESP_LOGI(TAG, "🚰 Valve OPENED - Tank is EMPTY (below UNTEN threshold) - FILLING STARTED");
+            ESP_LOGI(TAG, "🚰 Valve OPENED - Tank is EMPTY (below UNTEN threshold, confirmed %d times) - FILLING STARTED", bottom_threshold_confirmation_count);
         }
         
         // Timeout protection: if filling exceeds max timeout
         if (filling) {
             uint64_t now_ms = esp_timer_get_time() / 1000;
             uint16_t current_distance = state_snapshot.sensor_distance_cm;
+
+            // 25cm Sperre: Ventil sofort schließen bei >= 25cm
+            if (current_distance >= 25) {
+                gpio_set_level(GPIO_VALVE_CONTROL, 0);
+                set_valve_and_manual_state(false, false);
+                finalize_active_valve_session(now_ms);
+                filling = false;
+                manual_mode = false;
+                last_progress_time_ms = 0;
+                last_no_progress_log_ms = 0;
+                progress_reference_distance = 0;
+                progress_candidate_distance = 0;
+                progress_confirmation_count = 0;
+                bottom_threshold_confirmation_count = 0;
+                ESP_LOGW(TAG, "🚰 Valve CLOSED - 25cm safety limit reached (distance=%u cm)", current_distance);
+                last_tank_state = 0;
+                vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
+                continue;
+            }
 
             if (last_distance_cm > 0 && current_distance + FILL_PROGRESS_MIN_DELTA_CM <= last_distance_cm) {
                 if (current_distance < progress_candidate_distance) {
@@ -3757,7 +3787,7 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "===========================================");
-    ESP_LOGI(TAG, "🚀 bosch-tank %s (Build #%d)", VERSION_STRING, BUILD_NUMBER);
+    ESP_LOGI(TAG, "🚀 bosch-tank Build #%d", BUILD_NUMBER);
     ESP_LOGI(TAG, "   Compiled: %s", BUILD_TIMESTAMP);
     
     // Get chip info (v6.0 API change: requires pointer argument)

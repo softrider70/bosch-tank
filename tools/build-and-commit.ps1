@@ -60,6 +60,15 @@ if ($gitAddFiles.Count -gt 0) {
     
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Build metadata committed: $commitMessage" -ForegroundColor Green
+
+        # Push zum Remote Repository
+        Write-Host "Pushing to remote repository..." -ForegroundColor Cyan
+        $pushResult = & git push 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "Push successful" -ForegroundColor Green
+        } else {
+            Write-Host "Push failed (may need manual push): $pushResult" -ForegroundColor Yellow
+        }
     }
 }
 
