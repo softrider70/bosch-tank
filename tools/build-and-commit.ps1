@@ -6,7 +6,7 @@ $ProjectPath = Resolve-Path -Path $ProjectPath
 Set-Location $ProjectPath
 
 # ESP-IDF Umgebung aktivieren (export.bat)
-$espIdfPath = "C:\esp\v6.0\esp-idf"
+$espIdfPath = "C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\esp-idf"
 $exportBat = Join-Path $espIdfPath "export.bat"
 
 if (-not (Test-Path $exportBat)) {
@@ -25,10 +25,11 @@ if (Test-Path $incrementScript) {
 $buildNumberPath = Join-Path $ProjectPath ".build_number"
 $buildNumber = if (Test-Path $buildNumberPath) { Get-Content $buildNumberPath -Raw } else { "?" }
 
-# Build ausführen mit ESP-IDF Umgebung (cmd /c export.bat && idf.py build)
+# Build ausführen mit ESP-IDF Umgebung (activate-esp-idf.ps1)
 Write-Host "Building project..." -ForegroundColor Cyan
-$buildCmd = "$exportBat && python $espIdfPath\tools\idf.py build"
-cmd /c $buildCmd
+$activateScript = Join-Path $ProjectPath "activate-esp-idf.ps1"
+$buildCmd = ". '$activateScript'; idf.py build"
+powershell -ExecutionPolicy Bypass -NoProfile -Command $buildCmd
 $buildExitCode = $LASTEXITCODE
 
 if ($buildExitCode -ne 0) {
