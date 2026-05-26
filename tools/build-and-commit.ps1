@@ -37,10 +37,12 @@ if ($buildExitCode -ne 0) {
     exit $buildExitCode
 }
 
-# Commit mit Buildnummer
+# Commit mit Buildnummer und version.h
 $gitAddFiles = @()
 
 if (Test-Path $buildNumberPath) { $gitAddFiles += $buildNumberPath }
+$versionHeaderPath = Join-Path $ProjectPath "include\version.h"
+if (Test-Path $versionHeaderPath) { $gitAddFiles += $versionHeaderPath }
 
 if ($gitAddFiles.Count -gt 0) {
     Write-Host "Staging build metadata files..." -ForegroundColor Cyan
