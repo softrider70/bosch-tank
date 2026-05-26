@@ -19,7 +19,7 @@ Makefile
 *~
 
 # Version files (auto-generated)
-include/version.h
+# include/version.h - NEEDED for OTA build number display
 
 # sdkconfig (board-specific, local build configuration)
 sdkconfig
