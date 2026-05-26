@@ -1,6 +1,6 @@
 # bosch-tank
 
-ESP32-Firmware fuer die Ueberwachung und Steuerung eines Kaffeemaschinen-Wassertanks mit VL6150X/VL6180X-kompatiblem ToF-Sensor, Ventilsteuerung, WiFi-Weboberflaeche und persistenter Konfiguration.
+ESP32-Firmware fuer die Ueberwachung und Steuerung eines Kaffeemaschinen-Wassertanks mit VL53L0X ToF-Sensor, Ventilsteuerung, WiFi-Weboberflaeche und persistenter Konfiguration.
 
 Das Ventil wird jetzt ueber ein ILN44Z-Relaismodul angesteuert. Die Schaltung schaltet gegen Masse, der Relaiskreis arbeitet mit 12V und einem 1Ω-Widerstand zur Strombegrenzung, waehrend die Transformatorspannung beim Schalten konstant bleibt.
 
@@ -32,7 +32,7 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
 
 ### Tank- und Ventillogik
 
-- VL6150X/VL6180X-kompatible ToF-Abstandsmessung ueber I2C
+- VL53L0X ToF-Abstandsmessung ueber I2C
 - Automatische Befuellung zwischen OBEN- und UNTEN-Schwelle
 - Beim Erreichen des OBEN-Wertes wird das Befuellen gestoppt; das System muss nicht exakt auf dem Wert halten
 - Der BEFUELLEN-Button kann nur gestartet werden, solange der aktuelle Messwert groesser als der OBEN-Schwellenwert ist
