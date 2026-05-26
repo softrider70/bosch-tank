@@ -183,13 +183,13 @@
 #endif
 
 // Task Stack Sizes (bytes)
-#define TASK_STACK_SENSOR               4096
-#define TASK_STACK_VALVE                2048
-#define TASK_STACK_SERVER               8192
-#define TASK_STACK_WATCHDOG             2048
-#define TASK_STACK_WIFI                 8192    // Increased from 4096 for complex initialization
-#define TASK_STACK_TOUCH                3072    // Touch-Key Polling
-#define TASK_STACK_STACK_MONITOR        3072    // Stack-Überwachung für Laufzeitwarnungen
+#define TASK_STACK_SENSOR               8192
+#define TASK_STACK_VALVE                4096
+#define TASK_STACK_SERVER               16384
+#define TASK_STACK_WATCHDOG             4096
+#define TASK_STACK_WIFI                 16384   // Increased from 4096 for complex initialization
+#define TASK_STACK_TOUCH                6144    // Touch-Key Polling
+#define TASK_STACK_STACK_MONITOR        6144    // Stack-Überwachung für Laufzeitwarnungen
 
 // Task Intervals
 // (Already defined in Task Configuration section above)

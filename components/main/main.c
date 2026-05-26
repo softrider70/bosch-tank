@@ -2198,6 +2198,8 @@ h1{color:#1f2937;margin:0;font-size:19px}
 .big-num{font-size:38px;font-weight:bold;color:#0f4ab8;line-height:1}
 .percent{font-size:17px;color:#0f4ab8;margin-top:6px;font-weight:bold}
 .tank-bar{margin-top:10px;height:14px;background:#d6dae1;border-radius:999px;position:relative;overflow:hidden}
+.threshold-label-left{position:absolute;left:0;top:0;font-size:9px;color:#666;padding:2px 4px}
+.threshold-label-right{position:absolute;right:0;top:0;font-size:9px;color:#666;padding:2px 4px}
 .summary-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .stat-card{background:#f8fbff;border:1px solid #d7e6ff;border-radius:10px;padding:9px;min-height:66px}
 .stat-label{font-size:10px;color:#526071;margin-bottom:3px}
@@ -2253,6 +2255,8 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <div id="percent" class="percent">--</div>
 <div class="tank-bar">
 <div id="bar-fill" style="height:100%;background:#4caf50;width:0%"></div>
+<div id="threshold-top" class="threshold-label-left"></div>
+<div id="threshold-bottom" class="threshold-label-right"></div>
 </div>
 </div>
 <div class="summary-grid">
@@ -2663,6 +2667,8 @@ function updateDashboard(force){
     document.getElementById('level').textContent = lv;
     document.getElementById('percent').textContent = full.toFixed(0) + '%';
     document.getElementById('bar-fill').style.width = full + '%';
+    document.getElementById('threshold-top').textContent = sensors.threshold_top || '';
+    document.getElementById('threshold-bottom').textContent = sensors.threshold_bottom || '';
     syncValveIndicator(valve.state === 'OPEN');
     document.getElementById('status').textContent = d.status;
         document.getElementById('app-version').textContent = system.build_number ? 'Build #' + system.build_number : '-';
@@ -4058,7 +4064,7 @@ void app_main(void)
     task_result = xTaskCreatePinnedToCore(
         ota_health_check_task,
         "ota_health_check_task",
-        3072,
+        6144,
         NULL,
         TASK_PRIO_MAIN,
         NULL,
@@ -4067,7 +4073,7 @@ void app_main(void)
     if (task_result != pdPASS) {
         ESP_LOGW(TAG, "⚠️ Failed to create ota_health_check_task - OTA recovery disabled");
     } else {
-        ESP_LOGI(TAG, "   ✓ ota_health_check_task (priority %d, stack %d bytes, core %d)", TASK_PRIO_MAIN, 3072, TASK_CORE_NETWORK);
+        ESP_LOGI(TAG, "   ✓ ota_health_check_task (priority %d, stack %d bytes, core %d)", TASK_PRIO_MAIN, 6144, TASK_CORE_NETWORK);
     }
     
     ESP_LOGI(TAG, "✅ All tasks created and running");
