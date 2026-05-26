@@ -28,7 +28,7 @@ $buildNumber = if (Test-Path $buildNumberPath) { Get-Content $buildNumberPath -R
 # Build ausführen mit ESP-IDF Umgebung (cmd /c export.bat && idf.py build)
 Write-Host "Building project..." -ForegroundColor Cyan
 $buildCmd = "$exportBat && python $espIdfPath\tools\idf.py build"
-$buildResult = cmd /c $buildCmd
+cmd /c $buildCmd
 $buildExitCode = $LASTEXITCODE
 
 if ($buildExitCode -ne 0) {
@@ -37,27 +37,17 @@ if ($buildExitCode -ne 0) {
 }
 
 # Commit mit Buildnummer
-$versionHeaderPath = Join-Path $ProjectPath "include\version.h"
 $gitAddFiles = @()
 
 if (Test-Path $buildNumberPath) { $gitAddFiles += $buildNumberPath }
-if (Test-Path $versionHeaderPath) { $gitAddFiles += $versionHeaderPath }
 
 if ($gitAddFiles.Count -gt 0) {
     Write-Host "Staging build metadata files..." -ForegroundColor Cyan
     & git add -f @gitAddFiles
-    
-    $versionString = "build #$buildNumber"
-    if (Test-Path $versionHeaderPath) {
-        $match = Select-String -Path $versionHeaderPath -Pattern 'APP_FULL_VERSION\s+"(.+)"'
-        if ($match) {
-            $versionString = $match.Matches[0].Groups[1].Value
-        }
-    }
-    
-    $commitMessage = "chore: $versionString"
-    $commitResult = & git commit -m $commitMessage 2>&1
-    
+
+    $commitMessage = "chore: build #$buildNumber"
+    & git commit -m $commitMessage 2>&1
+
     if ($LASTEXITCODE -eq 0) {
         Write-Host "Build metadata committed: $commitMessage" -ForegroundColor Green
 
