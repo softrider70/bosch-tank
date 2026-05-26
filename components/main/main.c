@@ -142,7 +142,6 @@ static TaskHandle_t dns_task_handle = NULL;
 static TaskHandle_t stack_monitor_task_handle = NULL;
 static TaskHandle_t ota_task_handle = NULL;
 static volatile bool dns_server_stop_requested = false;
-static volatile bool sensor_reinit_requested = false;
 
 static i2c_master_bus_handle_t i2c_bus_handle = NULL;
 static i2c_master_dev_handle_t vl53l0x_dev_handle = NULL;
@@ -1703,17 +1702,6 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
 }
 
 /**
- * @brief Handler: POST /api/sensor/reset - Request TOF sensor reinitialization
- */
-static esp_err_t sensor_reset_handler(httpd_req_t *req)
-{
-    sensor_reinit_requested = true;
-    send_json_response(req,
-        "{\"status\":\"OK\",\"message\":\"Sensor-Reinit angefordert\"}");
-    return ESP_OK;
-}
-
-/**
  * @brief Handler: POST /api/system/reset - Soft reset (keep WiFi)
  */
 static esp_err_t system_reset_handler(httpd_req_t *req)
@@ -2198,8 +2186,8 @@ h1{color:#1f2937;margin:0;font-size:19px}
 .big-num{font-size:38px;font-weight:bold;color:#0f4ab8;line-height:1}
 .percent{font-size:17px;color:#0f4ab8;margin-top:6px;font-weight:bold}
 .tank-bar{margin-top:10px;height:14px;background:#d6dae1;border-radius:999px;position:relative;overflow:hidden}
-.threshold-label-left{position:absolute;left:0;top:0;font-size:9px;color:#666;padding:2px 4px}
-.threshold-label-right{position:absolute;right:0;top:0;font-size:9px;color:#666;padding:2px 4px}
+.threshold-label-left{position:absolute;left:0;top:0;font-size:9px;color:#666;padding:2px 4px;z-index:10}
+.threshold-label-right{position:absolute;right:0;top:0;font-size:9px;color:#666;padding:2px 4px;z-index:10}
 .summary-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .stat-card{background:#f8fbff;border:1px solid #d7e6ff;border-radius:10px;padding:9px;min-height:66px}
 .stat-label{font-size:10px;color:#526071;margin-bottom:3px}
@@ -2339,18 +2327,13 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <div class="status-row"><span>OTA-Meldung:</span><span id="ota-message">-</span></div>
 <div class="status-row"><span>In Arbeit:</span><span id="ota-in-progress">-</span></div>
 <div class="status-row"><span>Aktuelle Version:</span><span id="ota-current-version">-</span></div>
-<div class="status-row"><span>Zielversion:</span><span id="ota-target-version">-</span></div>
 <div class="status-row"><span>Letztes Ergebnis:</span><span id="ota-last-result">-</span></div>
-<div class="status-row"><span>Letzter Fehler:</span><span id="ota-last-error">-</span></div>
-<div class="status-row"><span>Start seit Boot:</span><span id="ota-last-start">-</span></div>
-<div class="status-row"><span>Ende seit Boot:</span><span id="ota-last-end">-</span></div>
 <div style="margin-top:10px;padding-top:10px;border-top:1px solid #ddd">
 <label for="ota-url">Firmware-URL:</label>
 <input type="text" id="ota-url" value="http://192.168.1.191/bosch-tank.bin" placeholder="http://192.168.1.191/bosch-tank.bin">
 <div class="buttons"><button class="btn-success" id="ota-start-btn" onclick="startOTA()">OTA starten</button></div>
 <div style="margin-top:6px;font-size:11px;color:#6b7280">Voreingestellt auf Laptop-IP 192.168.1.191.</div>
 </div>
-<div style="margin-top:8px;font-size:11px;color:#6b7280">Hinweis: Doppeltipp auf gruene Reset-Taste startet Sensor-Reinit.</div>
 <div id="msg-diagnostics" class="msg" style="display:none"></div>
 </div>
 
@@ -2409,22 +2392,14 @@ function loadDiagnostics(force){
             const messageEl = document.getElementById('ota-message');
             const inProgressEl = document.getElementById('ota-in-progress');
             const currentVersionEl = document.getElementById('ota-current-version');
-            const targetVersionEl = document.getElementById('ota-target-version');
             const lastResultEl = document.getElementById('ota-last-result');
-            const lastErrorEl = document.getElementById('ota-last-error');
-            const lastStartEl = document.getElementById('ota-last-start');
-            const lastEndEl = document.getElementById('ota-last-end');
             const otaButton = document.getElementById('ota-start-btn');
             if(statusEl) statusEl.textContent = d.status || '-';
             if(phaseEl) phaseEl.textContent = ota.phase || '-';
             if(messageEl) messageEl.textContent = ota.message || '-';
             if(inProgressEl) inProgressEl.textContent = ota.in_progress ? 'Ja' : 'Nein';
             if(currentVersionEl) currentVersionEl.textContent = ota.current_version || '-';
-            if(targetVersionEl) targetVersionEl.textContent = ota.target_version || '-';
             if(lastResultEl) lastResultEl.textContent = ota.last_result_ok ? 'OK' : 'FAIL';
-            if(lastErrorEl) lastErrorEl.textContent = ota.last_error || '-';
-            if(lastStartEl) lastStartEl.textContent = ota.last_start_ms ? (Number(ota.last_start_ms) / 1000).toFixed(1) + ' s' : '-';
-            if(lastEndEl) lastEndEl.textContent = ota.last_end_ms ? (Number(ota.last_end_ms) / 1000).toFixed(1) + ' s' : '-';
             if(otaButton) otaButton.disabled = ota.in_progress;
         })
         .catch(e => {
@@ -2574,16 +2549,6 @@ function resetWarnings(){
             syncResetButton();
         });
 }
-function resetSensor(){
-    if(counterResetInFlight) return;
-    fetch('/api/sensor/reset', {method: 'POST'})
-        .then(r => r.json())
-        .then(d => {
-            updateDashboard(true);
-            showMsg('dashboard', d.message || 'Sensor-Reinit angefordert', false);
-        })
-        .catch(() => showMsg('dashboard', 'Sensor-Reinit fehlgeschlagen', true));
-}
 function triggerCounterReset(){
     resetHoldTriggered = true;
     counterResetInFlight = true;
@@ -2667,8 +2632,8 @@ function updateDashboard(force){
     document.getElementById('level').textContent = lv;
     document.getElementById('percent').textContent = full.toFixed(0) + '%';
     document.getElementById('bar-fill').style.width = full + '%';
-    document.getElementById('threshold-top').textContent = sensors.threshold_top || '';
-    document.getElementById('threshold-bottom').textContent = sensors.threshold_bottom || '';
+    document.getElementById('threshold-top').textContent = d.config?.threshold_top_cm || '';
+    document.getElementById('threshold-bottom').textContent = d.config?.threshold_bottom_cm || '';
     syncValveIndicator(valve.state === 'OPEN');
     document.getElementById('status').textContent = d.status;
         document.getElementById('app-version').textContent = system.build_number ? 'Build #' + system.build_number : '-';
@@ -3083,40 +3048,33 @@ static void sensor_task(void *pvParameters)
         // Feed watchdog
         esp_task_wdt_reset();
 
-        if (sensor_reinit_requested) {
-            sensor_reinit_requested = false;
-            ESP_LOGW(TAG, "🔄 Sensor reinit requested via UI reset double-tap");
-            bool was_available = sensor_available;
-            esp_err_t reinit_result = vl53l0x_init();
-            if (reinit_result == ESP_OK) {
-                sensor_available = true;
-                fail_count = 0;
-                memset(distance_samples, 0, sizeof(distance_samples));
-                sample_idx = 0;
-                distance_sum = 0;
-                sample_count = 0;
-                xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-                sys_state.sensor_data_stale = false;
-                sys_state.sensor_last_raw_mm = 0;
-                xSemaphoreGive(sys_state_mutex);
-                ESP_LOGI(TAG, "✅ Sensor reinit successful");
-            } else {
-                sensor_available = was_available;
-                xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-                if (!sensor_available) {
-                    sys_state.sensor_data_stale = true;
-                }
-                xSemaphoreGive(sys_state_mutex);
-                ESP_LOGE(TAG, "❌ Sensor reinit failed: %s", esp_err_to_name(reinit_result));
-            }
-        }
-
         if (!sensor_available) {
             uint64_t now_ms = esp_timer_get_time() / 1000;
             if (last_auto_reinit_ms == 0 || (now_ms - last_auto_reinit_ms) >= SENSOR_AUTO_REINIT_COOLDOWN_MS) {
-                sensor_reinit_requested = true;
+                bool was_available = sensor_available;
+                esp_err_t reinit_result = vl53l0x_init();
                 last_auto_reinit_ms = now_ms;
-                ESP_LOGW(TAG, "🔁 Sensor unavailable - scheduling periodic reinit attempt");
+                if (reinit_result == ESP_OK) {
+                    sensor_available = true;
+                    fail_count = 0;
+                    memset(distance_samples, 0, sizeof(distance_samples));
+                    sample_idx = 0;
+                    distance_sum = 0;
+                    sample_count = 0;
+                    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                    sys_state.sensor_data_stale = false;
+                    sys_state.sensor_last_raw_mm = 0;
+                    xSemaphoreGive(sys_state_mutex);
+                    ESP_LOGI(TAG, "✅ Auto sensor reinit successful");
+                } else {
+                    sensor_available = was_available;
+                    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                    if (!sensor_available) {
+                        sys_state.sensor_data_stale = true;
+                    }
+                    xSemaphoreGive(sys_state_mutex);
+                    ESP_LOGE(TAG, "❌ Auto sensor reinit failed: %s", esp_err_to_name(reinit_result));
+                }
             }
         }
         
@@ -3137,11 +3095,30 @@ static void sensor_task(void *pvParameters)
                 uint64_t now_ms = esp_timer_get_time() / 1000;
                 if (fail_count >= SENSOR_AUTO_REINIT_FAIL_THRESHOLD &&
                     (last_auto_reinit_ms == 0 || (now_ms - last_auto_reinit_ms) >= SENSOR_AUTO_REINIT_COOLDOWN_MS)) {
-                    sensor_reinit_requested = true;
+                    bool was_available = sensor_available;
+                    esp_err_t reinit_result = vl53l0x_init();
                     last_auto_reinit_ms = now_ms;
                     fail_count = 0;
-                    ESP_LOGW(TAG,
-                        "🔁 Auto sensor reinit requested after consecutive invalid readings");
+                    if (reinit_result == ESP_OK) {
+                        sensor_available = true;
+                        memset(distance_samples, 0, sizeof(distance_samples));
+                        sample_idx = 0;
+                        distance_sum = 0;
+                        sample_count = 0;
+                        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                        sys_state.sensor_data_stale = false;
+                        sys_state.sensor_last_raw_mm = 0;
+                        xSemaphoreGive(sys_state_mutex);
+                        ESP_LOGW(TAG, "🔁 Auto sensor reinit successful after consecutive invalid readings");
+                    } else {
+                        sensor_available = was_available;
+                        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                        if (!sensor_available) {
+                            sys_state.sensor_data_stale = true;
+                        }
+                        xSemaphoreGive(sys_state_mutex);
+                        ESP_LOGE(TAG, "❌ Auto sensor reinit failed after consecutive invalid readings: %s", esp_err_to_name(reinit_result));
+                    }
                 }
 
                 // Use last good value from filter buffer
@@ -3702,14 +3679,6 @@ static httpd_handle_t start_webserver(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &warnings_reset_uri);
-
-        httpd_uri_t sensor_reset_uri = {
-            .uri = "/api/sensor/reset",
-            .method = HTTP_POST,
-            .handler = sensor_reset_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &sensor_reset_uri);
 
         httpd_uri_t ota_start_uri = {
             .uri = "/api/ota/start",
