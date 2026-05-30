@@ -1,12 +1,16 @@
 param(
-    [ValidateSet("usb", "ota", "last")]
+    [ValidateSet("usb", "ota", "last", "auto")]
     [string]$Mode = "last",
+
+    [ValidateSet("initial", "update", "auto")]
+    [string]$FlashType = "auto",
 
     [string]$UsbPort = "",
     [string]$DeviceIp = "",
     [string]$HostIp = "",
     [int]$HttpPort = 8070,
-    [int]$StatusTimeoutSec = 240
+    [int]$StatusTimeoutSec = 240,
+    [int]$Baud = 921600
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,15 +46,71 @@ function Get-AutoUsbPort {
     }
 
     if ($ports.Count -eq 1) {
+        Write-Host "[PORT] Nur ein Port gefunden: $($ports[0])" -ForegroundColor Green
         return $ports[0]
     }
 
+    # Versuche ESP32 zu erkennen via esptool
+    Write-Host "[PORT] Suche ESP32 auf verfügbaren Ports..." -ForegroundColor Cyan
+    foreach ($port in $ports) {
+        try {
+            $result = & python -m esptool --port $port --baud 115200 --connect-attempts 1 chip_id 2>&1
+            if ($LASTEXITCODE -eq 0 -and $result -match "Chip is") {
+                Write-Host "[PORT] ESP32 gefunden auf $port" -ForegroundColor Green
+                return $port
+            }
+        } catch {
+            # Nichts tun, nächster Port
+        }
+    }
+
+    # Fallback: COM3 wenn verfügbar
     if ($ports -contains 'COM3') {
+        Write-Host "[PORT] Verwende COM3 (Standard)" -ForegroundColor Yellow
         return 'COM3'
     }
 
-    Write-Host "Verfügbare serielle Ports: $($ports -join ', ')" -ForegroundColor Yellow
-    throw "Mehrere serielle Ports gefunden. Bitte -UsbPort explizit setzen."
+    # Letzter Fallback: Erster Port
+    Write-Host "[PORT] Verfügbare Ports: $($ports -join ', ')" -ForegroundColor Yellow
+    Write-Host "[PORT] Verwende ersten Port: $($ports[0])" -ForegroundColor Yellow
+    return $ports[0]
+}
+
+function Test-DeviceHasPartitionTable {
+    param([string]$Port)
+
+    Write-Host "[DETECT] Prüfe ob Gerät Partition Table hat..." -ForegroundColor Cyan
+    try {
+        # Versuche Partition Table zu lesen
+        $result = & python -m esptool --port $Port --baud 115200 --connect-attempts 2 read_flash 0x8000 32 - 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[DETECT] ✓ Partition Table gefunden (Update-Modus)" -ForegroundColor Green
+            return $true
+        }
+    } catch {
+        # Fehler ignorieren
+    }
+
+    Write-Host "[DETECT] ✗ Keine Partition Table (Initial-Flash nötig)" -ForegroundColor Yellow
+    return $false
+}
+
+function Get-FlashType {
+    param([string]$Port)
+
+    if (Test-DeviceHasPartitionTable -Port $Port) {
+        return "update"
+    } else {
+        return "initial"
+    }
+}
+
+function Write-ProgressBar {
+    param([int]$Percent, [string]$Label)
+    $filled = [math]::Floor($Percent / 5)
+    $empty = 20 - $filled
+    $bar = "[" + ("█" * $filled) + ("░" * $empty) + "]"
+    Write-Host "`r$bar $Percent% $Label" -NoNewline -ForegroundColor Cyan
 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
@@ -144,9 +204,16 @@ if ($Mode -eq 'last') {
         $Mode = $previousState.mode
         Write-Host "[FLASH] Verwende letzten Modus: $Mode" -ForegroundColor Cyan
     } else {
-        Write-Host "[FLASH] Kein letzter Flash-Modus gefunden, verwende usb als Standard." -ForegroundColor Yellow
+        Write-Host "[FLASH] Kein letzter Flash-Modus gefunden, verwende auto-detect." -ForegroundColor Yellow
         $Mode = 'usb'
+        $FlashType = 'auto'
     }
+}
+
+if ($Mode -eq 'auto') {
+    $Mode = 'usb'
+    $FlashType = 'auto'
+    Write-Host "[FLASH] Auto-Modus: Erkenne USB-Port und Flash-Typ..." -ForegroundColor Cyan
 }
 
 if ($Mode -eq 'usb') {
@@ -161,8 +228,16 @@ if ($Mode -eq 'usb') {
 
     Write-Host "[FLASH] Mode=usb, Port=$UsbPort"
 
+    # Auto-Detect Flash Type
+    if ($FlashType -eq 'auto') {
+        $FlashType = Get-FlashType -Port $UsbPort
+    }
+
     $binPath = Join-Path $repoRoot "build\bosch-tank.bin"
+    $bootloaderPath = Join-Path $repoRoot "build\bootloader\bootloader.bin"
+    $partitionPath = Join-Path $repoRoot "build\partition_table\partition-table.bin"
     $lastBuiltCommitPath = Join-Path $repoRoot ".last_built_commit"
+
     if (Needs-Build -BinaryPath $binPath -CommitStatePath $lastBuiltCommitPath) {
         Write-Host "[FLASH] Baue Projekt vor USB-Flash..." -ForegroundColor Cyan
         & powershell -NoProfile -ExecutionPolicy Bypass -File "$repoRoot\tools\build-and-commit.ps1"
@@ -171,12 +246,57 @@ if ($Mode -eq 'usb') {
         }
     }
 
-    python "$env:IDF_PATH\tools\idf.py" -p $UsbPort flash
+    # Prüfe ob alle Dateien für Initial-Flash existieren
+    if ($FlashType -eq 'initial') {
+        $missing = @()
+        if (-not (Test-Path $bootloaderPath)) { $missing += "bootloader.bin" }
+        if (-not (Test-Path $partitionPath)) { $missing += "partition-table.bin" }
+        if (-not (Test-Path $binPath)) { $missing += "bosch-tank.bin" }
+
+        if ($missing.Count -gt 0) {
+            throw "Fehlende Dateien für Initial-Flash: $($missing -join ', ') - Bitte erst build-and-commit ausführen"
+        }
+    }
+
+    # Flash durchführen
+    $startTime = Get-Date
+    if ($FlashType -eq 'initial') {
+        Write-Host "[FLASH] 🚀 Initial-Flash (Bootloader + Partition + App)..." -ForegroundColor Cyan
+        Write-Host "  Bootloader: $bootloaderPath" -ForegroundColor Gray
+        Write-Host "  Partition:  $partitionPath" -ForegroundColor Gray
+        Write-Host "  App:        $binPath" -ForegroundColor Gray
+
+        & python -m esptool --port $UsbPort --baud $Baud `
+            write_flash 0x0 $bootloaderPath `
+                        0x8000 $partitionPath `
+                        0x10000 $binPath 2>&1 | ForEach-Object {
+                Write-Host "  $_" -ForegroundColor Gray
+            }
+    } else {
+        Write-Host "[FLASH] ⚡ Fast Update (nur App)..." -ForegroundColor Cyan
+        Write-Host "  App: $binPath -> 0x10000" -ForegroundColor Gray
+
+        & python -m esptool --port $UsbPort --baud $Baud write_flash 0x10000 $binPath 2>&1 | ForEach-Object {
+            Write-Host "  $_" -ForegroundColor Gray
+        }
+    }
+
     $exitCode = $LASTEXITCODE
+    $duration = ((Get-Date) - $startTime).TotalSeconds
+
     if ($exitCode -eq 0) {
-        $state = @{ mode = 'usb'; usbPort = $UsbPort; deviceIp = ''; hostIp = ''; httpPort = $HttpPort }
+        Write-Host "`n[FLASH] ✅ Flash erfolgreich! (${duration:F1}s)" -ForegroundColor Green
+        $state = @{ mode = 'usb'; usbPort = $UsbPort; deviceIp = ''; hostIp = ''; httpPort = $HttpPort; flashType = $FlashType }
         $state | ConvertTo-Json | Set-Content -NoNewline -Encoding UTF8 $stateFile
-        Write-Host "[FLASH] Letzte Flash-Konfiguration gespeichert." -ForegroundColor Green
+        Write-Host "[FLASH] Konfiguration gespeichert (Modus: $FlashType)" -ForegroundColor Green
+
+        Write-Host "`n[FLASH] Nächste Schritte:" -ForegroundColor Cyan
+        if ($FlashType -eq 'initial') {
+            Write-Host "  - Zukünftige Updates: flash-mode.ps1 -Mode usb -FlashType update (schneller)" -ForegroundColor Yellow
+        }
+        Write-Host "  - Monitor starten: idf.py -p $UsbPort monitor" -ForegroundColor Yellow
+    } else {
+        Write-Host "`n[FLASH] ❌ Flash fehlgeschlagen!" -ForegroundColor Red
     }
     exit $exitCode
 }

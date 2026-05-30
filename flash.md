@@ -223,6 +223,5 @@ pause
 
 ---
 
-**Letzte Aktualisierung:** BUILD 12  
 **ESP-IDF Version:** 6.1  
-**Board:** ESP32-D (ESP32-D0WD-V3)
+**Board:** ESP32-DEVKITC-V4 (ESP32-D0WD-V3)

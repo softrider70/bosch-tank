@@ -1,6 +1,6 @@
 # bosch-tank
 
-ESP32-Firmware fuer die Ueberwachung und Steuerung eines Kaffeemaschinen-Wassertanks mit VL53L0X ToF-Sensor, Ventilsteuerung, WiFi-Weboberflaeche und persistenter Konfiguration.
+ESP32-Firmware fuer die Ueberwachung und Steuerung eines Kaffeemaschinen-Wassertanks mit VL6150X/VL6180X-kompatiblem ToF-Sensor, Ventilsteuerung, WiFi-Weboberflaeche und persistenter Konfiguration.
 
 Das Ventil wird jetzt ueber ein ILN44Z-Relaismodul angesteuert. Die Schaltung schaltet gegen Masse, der Relaiskreis arbeitet mit 12V und einem 1Ω-Widerstand zur Strombegrenzung, waehrend die Transformatorspannung beim Schalten konstant bleibt.
 
@@ -32,7 +32,7 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
 
 ### Tank- und Ventillogik
 
-- VL53L0X ToF-Abstandsmessung ueber I2C
+- VL6150X/VL6180X-kompatible ToF-Abstandsmessung ueber I2C
 - Automatische Befuellung zwischen OBEN- und UNTEN-Schwelle
 - Beim Erreichen des OBEN-Wertes wird das Befuellen gestoppt; das System muss nicht exakt auf dem Wert halten
 - Der BEFUELLEN-Button kann nur gestartet werden, solange der aktuelle Messwert groesser als der OBEN-Schwellenwert ist
@@ -59,7 +59,7 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
     - WiFi-Credentials
     - Notaus-Status
 - Durchflusswert ist als konfigurierbarer Parameter vorhanden
-- Standardwert fuer Durchfluss: 1.0 L/min
+- Standardwert fuer Durchfluss: 10.0 L/min
 
 ### Web-UI
 
@@ -80,37 +80,13 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
     - Fill-Progress-Timeout
     - Durchfluss in L/min
 
-## Konkrete Chat-Anforderungen, die in die Doku uebernommen wurden
+## Chat-Anforderungen
 
-Diese Punkte kamen explizit aus dem Arbeitschat und werden jetzt als Projektanforderungen gefuehrt:
-
-- App-/Build-Version muss in der UI sichtbar und aus dem Build ableitbar sein
-- Notaus darf sich nicht implizit selbst zuruecksetzen
-- Durchflusswert 1L/min muss in der Konfiguration vorhanden sein
-- Ventil- bzw. Mengenzaehler muessen sichtbar sein
-- Eingaben in der Konfigurationsseite muessen validiert werden
-- Alte, irrefuehrende Parallelimplementierungen duerfen nicht den aktiven Buildpfad verdecken
+Siehe `PROJECT.md` Abschnitt `chat_requirements` fuer die vollstaendige Liste.
 
 ## API-Uebersicht
 
-Der aktuelle Firmwarepfad registriert folgende Endpunkte:
-
-- `GET /`
-- `GET /api/status`
-- `GET /api/config`
-- `POST /api/config`
-- `POST /api/valve/manual`
-- `POST /api/valve/stop`
-- `POST /api/emergency_stop`
-- `GET /api/wifi/status`
-- `POST /api/wifi/config`
-- `POST /api/counters/reset`
-- `POST /api/warnings/reset`
-- `POST /api/sensor/reset`
-- `POST /api/ota/start`
-- `GET /api/ota/status`
-- `POST /api/ota/rollback`
-- `POST /api/system/reset`
+Siehe `PROJECT.md` Abschnitt `api.endpoints` fuer die vollstaendige Endpunkt-Liste.
 
 
 ## Statusmodell
@@ -270,13 +246,22 @@ Was der OTA-Modus automatisch macht:
 
 ### Lokaler OTA-Server
 
-Falls du den OTA-Server manuell starten möchtest, kannst du stattdessen auch `tools/serve_bin.py` verwenden:
+**Konfiguration (dauerhaft):**
+- Server-IP: `192.168.1.191`
+- Port: `80`
+- Firmware-URL: `http://192.168.1.191/bosch-tank.bin`
 
+**Server starten (im Hintergrund):**
+```powershell
+cd build && python -m http.server 80
+```
+
+Alternativ mit `tools/serve_bin.py`:
 ```powershell
 python tools/serve_bin.py
 ```
 
-Dann ist die Firmware unter `http://<host-ip>/bosch-tank.bin` erreichbar und kann direkt in der Web-UI oder per `POST /api/ota/start` verwendet werden.
+Dann ist die Firmware unter `http://192.168.1.191/bosch-tank.bin` erreichbar und kann direkt in der Web-UI oder per `POST /api/ota/start` verwendet werden.
 
 ## Entwickler-Tools & Wartung
 
@@ -311,11 +296,7 @@ idf.py -p <serial port to use> monitor
 
 ## GPIO Pin Mapping
 
-- `GPIO_LED_STATUS = 2` — Onboard-Status-LED
-- `GPIO_I2C_SDA = 21` — ToF-Sensor SDA
-- `GPIO_I2C_SCL = 22` — ToF-Sensor SCL
-- `GPIO_VALVE_CONTROL = 32` — Ventil-Relaisansteuerung (ILN44Z), schaltet 12V gegen Masse
-- `GPIO_TOUCH_KEY = 27` — Touch-Key (T7) fuer manuelles Befuellen
+Siehe `PROJECT.md` Abschnitt `hardware.pin_mapping` oder `include/config.h`.
 
 ## Hinweise
 
@@ -355,9 +336,11 @@ idf.py menuconfig
 
 ## Documentation
 
-- **`PROJECT.md`** — Detailed project specifications
-- **`sdkconfig`** — Build configuration (auto-generated)
-- **`include/config.h`** — Hardware pin mappings
+- **`PROJECT.md`** — Projektspezifikation (Hardware, API, Features, Config)
+- **`include/config.h`** — Konfigurationskonstanten
+- **`flash.md`** — Detaillierte USB-Flash-Anleitung
+- **`README_OTA_SAFETY.md`** — OTA-Sicherheitskonzept
+- **`sdkconfig`** — Build-Konfiguration (auto-generiert)
 
 ## Troubleshooting
 

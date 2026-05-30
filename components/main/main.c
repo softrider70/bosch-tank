@@ -100,6 +100,8 @@ typedef struct {
     char stack_warning_message[160];
     uint64_t current_valve_open_start_ms;  // Startzeit der aktuell offenen Ventilsitzung
     uint32_t last_update_timestamp;
+    uint32_t manual_fill_25cm_stop_threshold_cm;  // Stop-Schwellenwert bei manueller Befuellung (Default 23)
+    uint32_t manual_fill_25cm_monitor_timeout_ms;  // Monitor-Timeout als Fallback (Default 15000)
 } system_state_t;
 
 static system_state_t sys_state = {
@@ -125,7 +127,9 @@ static system_state_t sys_state = {
     .stack_warning_active = false,
     .stack_warning_message = "",
     .current_valve_open_start_ms = 0,
-    .last_update_timestamp = 0
+    .last_update_timestamp = 0,
+    .manual_fill_25cm_stop_threshold_cm = MANUAL_FILL_25CM_STOP_THRESHOLD_CM,
+    .manual_fill_25cm_monitor_timeout_ms = MANUAL_FILL_25CM_MONITOR_MS
 };
 
 // Mutex for sys_state access
@@ -268,6 +272,19 @@ static esp_err_t init_nvs(void)
     if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_FLOW_RATE, &stored_flow_rate) == ESP_OK) {
         sys_state.flow_rate_l_per_min = (float)stored_flow_rate / 100.0f;  // Store as int * 100
         ESP_LOGI(TAG, "Loaded flow_rate_l_per_min from NVS: %.2f L/min", sys_state.flow_rate_l_per_min);
+    }
+
+    // Load 25cm manual fill parameters
+    uint32_t stored_25cm_stop_threshold = 0;
+    if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_25CM_STOP_THRESHOLD, &stored_25cm_stop_threshold) == ESP_OK) {
+        sys_state.manual_fill_25cm_stop_threshold_cm = stored_25cm_stop_threshold;
+        ESP_LOGI(TAG, "Loaded manual_fill_25cm_stop_threshold_cm from NVS: %d cm", stored_25cm_stop_threshold);
+    }
+
+    uint32_t stored_25cm_monitor_timeout = 0;
+    if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_25CM_MONITOR_TIMEOUT, &stored_25cm_monitor_timeout) == ESP_OK) {
+        sys_state.manual_fill_25cm_monitor_timeout_ms = stored_25cm_monitor_timeout;
+        ESP_LOGI(TAG, "Loaded manual_fill_25cm_monitor_timeout_ms from NVS: %d ms", stored_25cm_monitor_timeout);
     }
 
     uint32_t stored_valve_open_count = 0;
@@ -446,7 +463,7 @@ static void touch_key_task(void *pvParameters)
             bool touched = touch_value < threshold;
 
             if (!touch_active && !touched) {
-                touch_key_baseline = (uint16_t)(((uint32_t)touch_key_baseline * 7U + touch_value) / 8U);
+                touch_key_baseline = (uint16_t)(((uint32_t)touch_key_baseline * 8U + touch_value) / 9U);
             }
 
             if (touched) {
@@ -874,7 +891,7 @@ static void begin_valve_session(uint64_t start_time_ms, bool manual_fill_active)
     xSemaphoreGive(sys_state_mutex);
 }
 
-static void update_runtime_config(uint32_t top, uint32_t bottom, uint32_t timeout, uint32_t fill_progress_timeout, float flow_rate)
+static void update_runtime_config(uint32_t top, uint32_t bottom, uint32_t timeout, uint32_t fill_progress_timeout, float flow_rate, uint32_t manual_fill_25cm_stop_threshold, uint32_t manual_fill_25cm_monitor_timeout)
 {
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
     sys_state.threshold_top = top;
@@ -882,6 +899,12 @@ static void update_runtime_config(uint32_t top, uint32_t bottom, uint32_t timeou
     sys_state.timeout_max = timeout;
     sys_state.fill_progress_timeout_ms = fill_progress_timeout;
     sys_state.flow_rate_l_per_min = flow_rate;
+    if (manual_fill_25cm_stop_threshold > 0) {
+        sys_state.manual_fill_25cm_stop_threshold_cm = manual_fill_25cm_stop_threshold;
+    }
+    if (manual_fill_25cm_monitor_timeout > 0) {
+        sys_state.manual_fill_25cm_monitor_timeout_ms = manual_fill_25cm_monitor_timeout;
+    }
     xSemaphoreGive(sys_state_mutex);
 }
 
@@ -1252,7 +1275,6 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"state\":\"%s\","
         "\"manual_fill_active\":%s,"
         "\"open_count\":%lu,"
-        "\"trigger_count\":%lu,"
         "\"emergency_trigger_count\":%lu,"
         "\"total_open_time_ms\":%llu,"
         "\"total_liters\":%.2f"
@@ -1290,7 +1312,6 @@ static esp_err_t status_handler(httpd_req_t *req)
         state_snapshot.flow_rate_l_per_min,
         state_snapshot.valve_state ? "OPEN" : "CLOSED",
         state_snapshot.manual_fill_active ? "true" : "false",
-        (unsigned long)state_snapshot.valve_open_count,
         (unsigned long)state_snapshot.valve_open_count,
         (unsigned long)state_snapshot.emergency_trigger_count,
         (unsigned long long)state_snapshot.total_open_time_ms,
@@ -1334,14 +1355,18 @@ static esp_err_t config_get_handler(httpd_req_t *req)
         "  \"threshold_bottom_cm\":%u,"
         "  \"timeout_max_ms\":%u,"
         "  \"fill_progress_timeout_ms\":%u,"
-        "  \"flow_rate_l_per_min\":%.2f"
+        "  \"flow_rate_l_per_min\":%.2f,"
+        "  \"manual_fill_25cm_stop_threshold_cm\":%u,"
+        "  \"manual_fill_25cm_monitor_timeout_ms\":%u"
         "}"
         "}",
         (unsigned int)state_snapshot.threshold_top,
         (unsigned int)state_snapshot.threshold_bottom,
         (unsigned int)state_snapshot.timeout_max,
         (unsigned int)state_snapshot.fill_progress_timeout_ms,
-        state_snapshot.flow_rate_l_per_min
+        state_snapshot.flow_rate_l_per_min,
+        (unsigned int)state_snapshot.manual_fill_25cm_stop_threshold_cm,
+        (unsigned int)state_snapshot.manual_fill_25cm_monitor_timeout_ms
     );
     
     send_json_response(req, json_response);
@@ -1363,23 +1388,30 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     
     // Simple JSON parsing for thresholds
     int top = -1, bottom = -1, timeout = -1, fill_progress_timeout = -1;
+    int manual_fill_25cm_stop_threshold = -1, manual_fill_25cm_monitor_timeout = -1;
     float flow_rate = -1.0f;
     bool has_top = parse_json_int_field(buf, "\"threshold_top_cm\"", &top);
     bool has_bottom = parse_json_int_field(buf, "\"threshold_bottom_cm\"", &bottom);
     bool has_timeout = parse_json_int_field(buf, "\"timeout_max_ms\"", &timeout);
     bool has_fill_progress_timeout = parse_json_int_field(buf, "\"fill_progress_timeout_ms\"", &fill_progress_timeout);
     bool has_flow_rate = parse_json_float_field(buf, "\"flow_rate_l_per_min\"", &flow_rate);
-    
+    bool has_25cm_stop = parse_json_int_field(buf, "\"manual_fill_25cm_stop_threshold_cm\"", &manual_fill_25cm_stop_threshold);
+    bool has_25cm_timeout = parse_json_int_field(buf, "\"manual_fill_25cm_monitor_timeout_ms\"", &manual_fill_25cm_monitor_timeout);
+
     if (has_top && has_bottom && has_timeout && has_fill_progress_timeout && has_flow_rate &&
         top >= 0 && bottom >= 0 && timeout >= 0 && fill_progress_timeout >= 0 && flow_rate >= 0.0f) {
 
-        if (top > 0 && bottom > top && timeout >= 1000 && fill_progress_timeout >= 1000 && flow_rate > 0.0f) {
+        if (top > 0 && top <= 30 && bottom > top && bottom <= 50 && timeout >= 1000 && fill_progress_timeout >= 1000 && flow_rate > 0.0f && flow_rate <= 50.0f &&
+            (!has_25cm_stop || (manual_fill_25cm_stop_threshold >= 1 && manual_fill_25cm_stop_threshold <= 30)) &&
+            (!has_25cm_timeout || manual_fill_25cm_monitor_timeout >= 1000)) {
             esp_err_t nvs_err = ESP_OK;
             nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_THRESHOLD_TOP, top);
             if (nvs_err == ESP_OK) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_THRESHOLD_BOTTOM, bottom);
             if (nvs_err == ESP_OK) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_VALVE_TIMEOUT_MAX, timeout);
             if (nvs_err == ESP_OK) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_FILL_PROGRESS_TIMEOUT, fill_progress_timeout);
             if (nvs_err == ESP_OK) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_FLOW_RATE, (uint32_t)(flow_rate * 100.0f));
+            if (nvs_err == ESP_OK && has_25cm_stop) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_25CM_STOP_THRESHOLD, manual_fill_25cm_stop_threshold);
+            if (nvs_err == ESP_OK && has_25cm_timeout) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_25CM_MONITOR_TIMEOUT, manual_fill_25cm_monitor_timeout);
             if (nvs_err == ESP_OK) nvs_err = nvs_commit(sys_state.nvs_handle);
 
             if (nvs_err != ESP_OK) {
@@ -1388,7 +1420,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
                 return ESP_FAIL;
             }
 
-            update_runtime_config(top, bottom, timeout, fill_progress_timeout, flow_rate);
+            update_runtime_config(top, bottom, timeout, fill_progress_timeout, flow_rate, manual_fill_25cm_stop_threshold, manual_fill_25cm_monitor_timeout);
             
             char response[256];
             snprintf(response, sizeof(response),
@@ -1467,26 +1499,31 @@ static esp_err_t emergency_stop_handler(httpd_req_t *req)
         if (state_snapshot.emergency_stop_active) {
             ESP_LOGI(TAG, "♻️  EMERGENCY STOP RESET - system resuming normal operations");
             reset_emergency_stop();
+            // Close valve on reset of active emergency (safety)
+            gpio_set_level(GPIO_VALVE_CONTROL, 0);
+            set_valve_and_manual_state(false, false);
+            finalize_active_valve_session(esp_timer_get_time() / 1000);
         } else {
             ESP_LOGI(TAG, "Reset requested while no emergency stop was active");
         }
     } else {
         ESP_LOGW(TAG, "🚨 EMERGENCY STOP TRIGGERED - all operations halted!");
         trigger_emergency_stop("Emergency activated via API");
+        // Close valve immediately on trigger
+        gpio_set_level(GPIO_VALVE_CONTROL, 0);
+        set_valve_and_manual_state(false, false);
+        finalize_active_valve_session(esp_timer_get_time() / 1000);
     }
     
-    // Always close valve when emergency button is pressed
-    gpio_set_level(GPIO_VALVE_CONTROL, 0);
-    set_valve_and_manual_state(false, false);
-    finalize_active_valve_session(esp_timer_get_time() / 1000);
     get_system_state_snapshot(&state_snapshot);
     
     char response[256];
     snprintf(response, sizeof(response),
-        "{\"status\":\"%s\",\"emergency\":%s,\"message\":\"%s\",\"valve\":\"CLOSED\"}",
+        "{\"status\":\"%s\",\"emergency\":%s,\"message\":\"%s\",\"valve\":\"%s\"}",
         state_snapshot.emergency_stop_active ? "EMERGENCY" : "OK",
         state_snapshot.emergency_stop_active ? "true" : "false",
-        state_snapshot.emergency_stop_active ? "Emergency activated" : "Emergency reset"
+        state_snapshot.emergency_stop_active ? "Emergency activated" : "Emergency reset",
+        state_snapshot.valve_state ? "OPEN" : "CLOSED"
     );
     send_json_response(req, response);
     
@@ -1706,6 +1743,15 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
  */
 static esp_err_t system_reset_handler(httpd_req_t *req)
 {
+    // Reset waehrend OTA verhindern
+    ota_state_t ota_snapshot;
+    get_ota_state_snapshot(&ota_snapshot);
+    if (ota_snapshot.in_progress || ota_task_handle != NULL) {
+        send_json_response(req,
+            "{\"status\":\"ERROR\",\"message\":\"Reset waehrend OTA nicht moeglich\"}");
+        return ESP_OK;
+    }
+
     gpio_set_level(GPIO_VALVE_CONTROL, 0);
     set_valve_and_manual_state(false, false);
     finalize_active_valve_session(esp_timer_get_time() / 1000);
@@ -1795,6 +1841,12 @@ static void ota_update_task(void *pvParameters)
     }
 
     if (err == ESP_OK) {
+        // Persist OTA success flag to NVS so health-check works after reboot
+        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+        nvs_set_u32(sys_state.nvs_handle, NVS_KEY_OTA_LAST_RESULT_OK, 1);
+        nvs_commit(sys_state.nvs_handle);
+        xSemaphoreGive(sys_state_mutex);
+
         xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
         ota_state.in_progress = false;
         ota_state.last_result_ok = true;
@@ -1896,6 +1948,11 @@ static void ota_health_check_task(void *pvParameters)
                 vTaskDelay(pdMS_TO_TICKS(2000));  // Zeit fuer Rollback
                 esp_restart();
             }
+        } else if (time_since_boot >= 120000 || health_passed || !last_ota_ok) {
+            // Check window passed or no OTA pending - terminate task to free resources
+            ESP_LOGI(TAG, "OTA Health-Check task ending (window passed or not needed)");
+            vTaskDelete(NULL);
+            return;  // Unreachable, but satisfies static analysis
         }
         
         vTaskDelay(pdMS_TO_TICKS(CHECK_INTERVAL_MS));
@@ -2285,6 +2342,11 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <input type="number" id="fill-progress-timeout" min="1000" max="60000">
 <label for="flow-rate">Durchfluss (L/min):</label>
 <input type="number" id="flow-rate" step="0.1" min="0.1" max="50">
+<p style="font-size:12px;margin:10px 0 10px 0"><b>Manuelle Befuellung (25cm):</b></p>
+<label for="25cm-stop">Stop-Schwellenwert (cm):</label>
+<input type="number" id="25cm-stop" min="1" max="30">
+<label for="25cm-timeout">Monitor-Timeout (ms):</label>
+<input type="number" id="25cm-timeout" min="1000" max="60000">
 <div class="buttons">
 <button class="btn-success" id="save-btn" onclick="saveSettings()">Speichern</button>
 </div>
@@ -2637,7 +2699,7 @@ function updateDashboard(force){
     syncValveIndicator(valve.state === 'OPEN');
     document.getElementById('status').textContent = d.status;
         document.getElementById('app-version').textContent = system.build_number ? 'Build #' + system.build_number : '-';
-    document.getElementById('open-count').textContent = Number((valve.trigger_count ?? valve.open_count) || 0).toFixed(0);
+    document.getElementById('open-count').textContent = Number(valve.open_count || 0).toFixed(0);
     document.getElementById('emergency-count').textContent = Number(valve.emergency_trigger_count || 0).toFixed(0);
     document.getElementById('total-liters').textContent = Number(valve.total_liters || 0).toFixed(2) + ' L';
     document.getElementById('total-time').textContent = Math.floor(Number(valve.total_open_time_ms || 0) / 1000) + ' s';
@@ -2710,9 +2772,10 @@ function fill(){
     });
 }
 function stop(){fetch('/api/valve/stop', {method: 'POST'}).then(() => {isFilling = false; updateDashboard(true); showMsg('dashboard', 'Ventil geschlossen', false);});}
+function resetSensor(){if(!confirm('Sensor-Neuinitialisierung durch System-Neustart?')) return; fetch('/api/system/reset', {method: 'POST'}).then(() => showMsg('dashboard', 'Neustart...', false)).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
 function resetEmergency(){if(!isEmergencyActive){if(resetHoldTriggered) return; const now = Date.now(); const isDoubleTap = (now - lastResetTapMs) <= 450; lastResetTapMs = now; if(isDoubleTap){resetSensor(); return;} if(hasStickyWarning){resetWarnings(); return;} showMsg('dashboard', 'Doppeltipp: Sensor-Reinit | 3 Sekunden halten: Zaehler-Reset', false); return;} fetch('/api/emergency_stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset'})}).then(r => r.json()).then(d => {updateDashboard(true); document.getElementById('emergency-reason').style.display = 'none'; showMsg('dashboard', d.message || 'Reset ausgefuehrt', false);}).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
-function loadSettings(){fetch('/api/config').then(r => r.json()).then(d => {document.getElementById('top').value = d.config.threshold_top_cm; document.getElementById('bottom').value = d.config.threshold_bottom_cm; document.getElementById('timeout').value = d.config.timeout_max_ms; document.getElementById('fill-progress-timeout').value = d.config.fill_progress_timeout_ms; document.getElementById('flow-rate').value = d.config.flow_rate_l_per_min;});}
-function saveSettings(){const top = parseInt(document.getElementById('top').value, 10); const bottom = parseInt(document.getElementById('bottom').value, 10); const timeout = parseInt(document.getElementById('timeout').value, 10); const fillProgressTimeout = parseInt(document.getElementById('fill-progress-timeout').value, 10); const flowRate = parseFloat(document.getElementById('flow-rate').value); if(!Number.isFinite(top) || !Number.isFinite(bottom) || !Number.isFinite(timeout) || !Number.isFinite(fillProgressTimeout) || !Number.isFinite(flowRate)){showMsg('settings', 'Alle Felder muessen gueltige Zahlen enthalten', true); return;} if(top < 1 || top > 100 || bottom < 1 || bottom > 100){showMsg('settings', 'OBEN und UNTEN muessen zwischen 1 und 100 cm liegen', true); return;} if(top >= bottom){showMsg('settings', 'OBEN muss kleiner als UNTEN sein', true); return;} if(timeout < 1000 || fillProgressTimeout < 1000){showMsg('settings', 'Timeout-Werte muessen mindestens 1000 ms sein', true); return;} if(flowRate <= 0 || flowRate > 50){showMsg('settings', 'Durchfluss muss zwischen 0.1 und 50 L/min liegen', true); return;} const cfg = {threshold_top_cm: top, threshold_bottom_cm: bottom, timeout_max_ms: timeout, fill_progress_timeout_ms: fillProgressTimeout, flow_rate_l_per_min: flowRate}; settingsSaveInFlight = true; syncSaveButton(); fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg)}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: ' + r.status)); return r.json();}).then(() => {showMsg('settings', 'Einstellungen gespeichert', false); updateDashboard(true);}).catch(e => showMsg('settings', 'Fehler: ' + e.message, true)).finally(() => {settingsSaveInFlight = false; syncSaveButton();});}
+function loadSettings(){fetch('/api/config').then(r => r.json()).then(d => {document.getElementById('top').value = d.config.threshold_top_cm; document.getElementById('bottom').value = d.config.threshold_bottom_cm; document.getElementById('timeout').value = d.config.timeout_max_ms; document.getElementById('fill-progress-timeout').value = d.config.fill_progress_timeout_ms; document.getElementById('flow-rate').value = d.config.flow_rate_l_per_min; document.getElementById('25cm-stop').value = d.config.manual_fill_25cm_stop_threshold_cm; document.getElementById('25cm-timeout').value = d.config.manual_fill_25cm_monitor_timeout_ms;});}
+function saveSettings(){const top = parseInt(document.getElementById('top').value, 10); const bottom = parseInt(document.getElementById('bottom').value, 10); const timeout = parseInt(document.getElementById('timeout').value, 10); const fillProgressTimeout = parseInt(document.getElementById('fill-progress-timeout').value, 10); const flowRate = parseFloat(document.getElementById('flow-rate').value); const cm25Stop = parseInt(document.getElementById('25cm-stop').value, 10); const cm25Timeout = parseInt(document.getElementById('25cm-timeout').value, 10); if(!Number.isFinite(top) || !Number.isFinite(bottom) || !Number.isFinite(timeout) || !Number.isFinite(fillProgressTimeout) || !Number.isFinite(flowRate) || !Number.isFinite(cm25Stop) || !Number.isFinite(cm25Timeout)){showMsg('settings', 'Alle Felder muessen gueltige Zahlen enthalten', true); return;} if(top < 1 || top > 100 || bottom < 1 || bottom > 100){showMsg('settings', 'OBEN und UNTEN muessen zwischen 1 und 100 cm liegen', true); return;} if(top >= bottom){showMsg('settings', 'OBEN muss kleiner als UNTEN sein', true); return;} if(timeout < 1000 || fillProgressTimeout < 1000 || cm25Timeout < 1000){showMsg('settings', 'Timeout-Werte muessen mindestens 1000 ms sein', true); return;} if(flowRate <= 0 || flowRate > 50){showMsg('settings', 'Durchfluss muss zwischen 0.1 und 50 L/min liegen', true); return;} if(cm25Stop < 1 || cm25Stop > 30){showMsg('settings', '25cm Stop-Schwellenwert muss zwischen 1 und 30 cm liegen', true); return;} const cfg = {threshold_top_cm: top, threshold_bottom_cm: bottom, timeout_max_ms: timeout, fill_progress_timeout_ms: fillProgressTimeout, flow_rate_l_per_min: flowRate, manual_fill_25cm_stop_threshold_cm: cm25Stop, manual_fill_25cm_monitor_timeout_ms: cm25Timeout}; settingsSaveInFlight = true; syncSaveButton(); fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg)}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: ' + r.status)); return r.json();}).then(() => {showMsg('settings', 'Einstellungen gespeichert', false); updateDashboard(true);}).catch(e => showMsg('settings', 'Fehler: ' + e.message, true)).finally(() => {settingsSaveInFlight = false; syncSaveButton();});}
 function loadWiFi(){fetch('/api/wifi/status').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {const c=d.wifi&&d.wifi.connected; document.getElementById('wifi-con').textContent=c?'Verbunden':'Getrennt'; document.getElementById('wifi-con').style.color=c?'#4caf50':'#f44336'; document.getElementById('wifi-ssid').textContent = (d.wifi && d.wifi.ssid) ? d.wifi.ssid : '-'; document.getElementById('wifi-rssi').textContent = (d.wifi && d.wifi.rssi) ? (d.wifi.rssi + ' dBm') : '-'; document.getElementById('wifi-ip').textContent = (d.wifi && d.wifi.ip) ? d.wifi.ip : '-';}).catch(e => {console.error('loadWiFi failed:', e); document.getElementById('wifi-con').textContent='Fehler'; showMsg('wifi', 'WiFi API Fehler', true);});}
 function connectWiFi(){const s = document.getElementById('new-ssid').value; const p = document.getElementById('new-pass').value; if(!s||!p) {showMsg('wifi', 'SSID und Pass erforderlich', true); return;} fetch('/api/wifi/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ssid: s, password: p})}).then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {showMsg('wifi', 'WiFi Update gesendet', false); document.getElementById('new-ssid').value = ''; document.getElementById('new-pass').value = ''; setTimeout(loadWiFi, 2000);}).catch(e => {console.error('connectWiFi failed:', e); showMsg('wifi', 'Fehler: '+e.message, true);});}
 function reset(){if(confirm('System wirklich neustarten?')) fetch('/api/system/reset', {method: 'POST'}).then(() => showMsg('wifi', 'Neustart...', false)).catch(e => showMsg('wifi', 'Fehler', true));}
@@ -2757,9 +2820,6 @@ updateDashboard();
 #define IDENTIFICATION_REVISION_ID                  0x0001
 #define SLAVE_DEVICE_ADDRESS                        0x0212
 #define SYSRANGE__INTERMEASUREMENT_PERIOD           0x001B
-
-// Module-level state
-static int unused_tof_state_marker = 0;
 
 #define I2C_TRANSFER_TIMEOUT_MS 1000
 #define I2C_SCAN_TIMEOUT_MS 200
@@ -2839,6 +2899,7 @@ static bool vl53l0x_read_reg_retry(uint16_t reg, uint8_t *value, int attempts)
             return true;
         }
         ESP_LOGW(TAG, "ToF read reg 0x%04X attempt %d failed: %s", reg, i + 1, esp_err_to_name(ret));
+        esp_task_wdt_reset();  // Watchdog fuettern, um Trigger zu verhindern
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     return false;
@@ -2983,6 +3044,7 @@ static uint16_t vl53l0x_read_single_mm(void)
             ESP_LOGW(TAG, "VL6180X read timeout");
             return 65535;
         }
+        esp_task_wdt_reset();  // Watchdog fuettern, um Trigger zu verhindern
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
@@ -3029,9 +3091,7 @@ static void sensor_task(void *pvParameters)
     } else {
         ESP_LOGE(TAG, "⚠️  TOF sensor NOT DETECTED - EMERGENCY STOP");
         ESP_LOGE(TAG, "   If the I2C scan did not show 0x29, verify wiring, pull-ups and sensor power.");
-        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
         trigger_emergency_stop("TOF sensor not detected");
-        xSemaphoreGive(sys_state_mutex);
     }
     
     ESP_LOGI(TAG, "🚀 Sensor mode: %s", sensor_available ? "REAL HARDWARE" : "EMERGENCY (no sensor)");
@@ -3051,7 +3111,6 @@ static void sensor_task(void *pvParameters)
         if (!sensor_available) {
             uint64_t now_ms = esp_timer_get_time() / 1000;
             if (last_auto_reinit_ms == 0 || (now_ms - last_auto_reinit_ms) >= SENSOR_AUTO_REINIT_COOLDOWN_MS) {
-                bool was_available = sensor_available;
                 esp_err_t reinit_result = vl53l0x_init();
                 last_auto_reinit_ms = now_ms;
                 if (reinit_result == ESP_OK) {
@@ -3067,11 +3126,9 @@ static void sensor_task(void *pvParameters)
                     xSemaphoreGive(sys_state_mutex);
                     ESP_LOGI(TAG, "✅ Auto sensor reinit successful");
                 } else {
-                    sensor_available = was_available;
+                    // sensor_available bleibt false
                     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-                    if (!sensor_available) {
-                        sys_state.sensor_data_stale = true;
-                    }
+                    sys_state.sensor_data_stale = true;
                     xSemaphoreGive(sys_state_mutex);
                     ESP_LOGE(TAG, "❌ Auto sensor reinit failed: %s", esp_err_to_name(reinit_result));
                 }
@@ -3142,8 +3199,8 @@ static void sensor_task(void *pvParameters)
                 xSemaphoreGive(sys_state_mutex);
             }
             
-            // Check if distance > 30cm (300mm), emergency stop
-            if (distance_mm > 3000) {  // 30cm = 300mm, but allow some margin
+            // Sicherheitspruefung: Sensorwert > 300cm (3000mm) = Sensorfehler
+            if (distance_mm > 3000) {
                 system_state_t state_snapshot;
                 get_system_state_snapshot(&state_snapshot);
                 if (!state_snapshot.emergency_stop_active) {
@@ -3176,9 +3233,6 @@ static void sensor_task(void *pvParameters)
         int prev_distance = sys_state.sensor_distance_cm;
         sys_state.sensor_distance_cm = distance_cm;
         sys_state.last_update_timestamp = (uint32_t)(esp_timer_get_time() / 1000000);
-        if (!sensor_available) {
-            sys_state.sensor_data_stale = true;
-        }
         xSemaphoreGive(sys_state_mutex);
         
         // Log significant changes
@@ -3216,6 +3270,20 @@ static void sensor_task(void *pvParameters)
  * - When tank level reaches OBEN: Close valve
  * - If filling exceeds TIMEOUT_MAX: Close valve as safety measure
  */
+// Hilfsmakro: Fuellfortschritt-Variablen zuruecksetzen (nur in valve_task)
+#define RESET_FILL_PROGRESS_VARS() do { \
+    filling = false; \
+    manual_mode = false; \
+    last_progress_time_ms = 0; \
+    last_no_progress_log_ms = 0; \
+    last_distance_cm = 0; \
+    progress_reference_distance = 0; \
+    progress_candidate_distance = 0; \
+    progress_confirmation_count = 0; \
+    manual_fill_25cm_start_ms = 0; \
+    manual_fill_25cm_oben_confirmation_count = 0; \
+} while(0)
+
 static void valve_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "🚰 Valve task started");
@@ -3234,7 +3302,10 @@ static void valve_task(void *pvParameters)
     uint8_t progress_confirmation_count = 0;
     int last_tank_state = 0;  // 0=unknown, 1=full, 2=filling, 3=empty
     uint8_t bottom_threshold_confirmation_count = 0;  // Counter für 3 aufeinanderfolgende Messungen unter UNTEN
-    
+    uint64_t manual_fill_25cm_start_ms = 0;  // Startzeit für manuelles Befüllen bei 25cm
+    uint8_t manual_fill_25cm_oben_confirmation_count = 0;  // Counter für 3 aufeinanderfolgende OBEN-Messungen
+    uint64_t fill_stop_cooldown_ms = 0;  // Beruhigungszeit nach OBEN-Erreichen
+
     while (1) {
         // Feed watchdog - CRITICAL for safety
         esp_task_wdt_reset();
@@ -3245,6 +3316,16 @@ static void valve_task(void *pvParameters)
         
         // Determine tank state based on sensor readings
         // 25cm Sperre: Bei >= 25cm immer CLOSED (Sicherheitslimit)
+        // Cooldown: Nach OBEN-Erreichen 5 Sek keine Aktionen
+        uint64_t now_ms = esp_timer_get_time() / 1000;
+        bool in_cooldown = (fill_stop_cooldown_ms > 0) && ((now_ms - fill_stop_cooldown_ms) < FILL_STOP_COOLDOWN_MS);
+
+        // Log bei Cooldown-Ende
+        if (fill_stop_cooldown_ms > 0 && !in_cooldown) {
+            ESP_LOGI(TAG, "✅ Cooldown ended - resuming normal control logic");
+            fill_stop_cooldown_ms = 0;
+        }
+
         if (state_snapshot.sensor_distance_cm >= 25) {
             current_tank_state = 0;  // UNKNOWN/SICHERHEITSSPERRE - Ventil bleibt geschlossen
             bottom_threshold_confirmation_count = 0;  // Counter zurücksetzen
@@ -3268,38 +3349,30 @@ static void valve_task(void *pvParameters)
         }
 
         if (filling && !state_snapshot.valve_state) {
-            finalize_active_valve_session(esp_timer_get_time() / 1000);
-            filling = false;
-            manual_mode = false;
-            last_progress_time_ms = 0;
-            last_no_progress_log_ms = 0;
-            last_distance_cm = 0;
-            progress_reference_distance = 0;
-            progress_candidate_distance = 0;
-            progress_confirmation_count = 0;
+            finalize_active_valve_session(now_ms);
+            RESET_FILL_PROGRESS_VARS();
             ESP_LOGI(TAG, "🚰 Valve CLOSED - session finalized after external stop");
         }
 
         if (filling && manual_mode && !state_snapshot.manual_fill_active) {
             gpio_set_level(GPIO_VALVE_CONTROL, 0);
             set_valve_and_manual_state(false, false);
-            finalize_active_valve_session(esp_timer_get_time() / 1000);
-            filling = false;
-            manual_mode = false;
-            last_progress_time_ms = 0;
-            last_no_progress_log_ms = 0;
-            last_distance_cm = 0;
-            progress_reference_distance = 0;
-            progress_candidate_distance = 0;
-            progress_confirmation_count = 0;
+            finalize_active_valve_session(now_ms);
+            RESET_FILL_PROGRESS_VARS();
             ESP_LOGI(TAG, "🚰 Valve CLOSED - manual fill stopped");
         }
 
         if (state_snapshot.manual_fill_active && !filling && !state_snapshot.emergency_stop_active && current_tank_state != 1) {
+            // Sonderbehandlung für 25cm: 15-Sekunden-Überwachung auf Werte < 25
+            if (state_snapshot.sensor_distance_cm >= 25) {
+                manual_fill_25cm_start_ms = now_ms;
+                manual_fill_25cm_oben_confirmation_count = 0;
+                ESP_LOGW(TAG, "⚠️  Manual fill at 25cm - 15s monitoring for values < 25 started (dist=%d)", state_snapshot.sensor_distance_cm);
+            }
             gpio_set_level(GPIO_VALVE_CONTROL, 1);
             filling = true;
             manual_mode = true;
-            fill_start_time_ms = esp_timer_get_time() / 1000;
+            fill_start_time_ms = now_ms;
             last_progress_time_ms = fill_start_time_ms;
             last_no_progress_log_ms = fill_start_time_ms;
             begin_valve_session(fill_start_time_ms, true);
@@ -3323,16 +3396,10 @@ static void valve_task(void *pvParameters)
                     if (filling) {
                         gpio_set_level(GPIO_VALVE_CONTROL, 0);  // Close valve
                         set_valve_and_manual_state(false, false);
-                        finalize_active_valve_session(esp_timer_get_time() / 1000);
-                        filling = false;
-                        manual_mode = false;
-                        last_progress_time_ms = 0;
-                        last_no_progress_log_ms = 0;
-                        last_distance_cm = 0;
-                        progress_reference_distance = 0;
-                        progress_candidate_distance = 0;
-                        progress_confirmation_count = 0;
-                        ESP_LOGI(TAG, "🚰 Valve CLOSED - Tank is FULL (reached OBEN threshold)");
+                        finalize_active_valve_session(now_ms);
+                        RESET_FILL_PROGRESS_VARS();
+                        fill_stop_cooldown_ms = now_ms;  // Cooldown starten
+                        ESP_LOGI(TAG, "🚰 Valve CLOSED - Tank is FULL (reached OBEN threshold) - 5s cooldown started");
                     }
                     break;
                     
@@ -3342,11 +3409,11 @@ static void valve_task(void *pvParameters)
             last_tank_state = current_tank_state;
         }
 
-        if (current_tank_state == 3 && !filling && !state_snapshot.emergency_stop_active && !state_snapshot.manual_fill_active && !state_snapshot.user_fill_halt && state_snapshot.sensor_distance_cm < 25) {
+        if (current_tank_state == 3 && !filling && !state_snapshot.emergency_stop_active && !state_snapshot.manual_fill_active && !state_snapshot.user_fill_halt && state_snapshot.sensor_distance_cm < 25 && !in_cooldown) {
             gpio_set_level(GPIO_VALVE_CONTROL, 1);  // Open valve
             filling = true;
             manual_mode = false;
-            fill_start_time_ms = esp_timer_get_time() / 1000;
+            fill_start_time_ms = now_ms;
             last_progress_time_ms = fill_start_time_ms;
             last_no_progress_log_ms = fill_start_time_ms;
             begin_valve_session(fill_start_time_ms, false);
@@ -3359,26 +3426,73 @@ static void valve_task(void *pvParameters)
         
         // Timeout protection: if filling exceeds max timeout
         if (filling) {
-            uint64_t now_ms = esp_timer_get_time() / 1000;
             uint16_t current_distance = state_snapshot.sensor_distance_cm;
 
             // 25cm Sperre: Ventil sofort schließen bei >= 25cm
-            if (current_distance >= 25) {
+            // Ausnahme: Manuelles Befüllen bei 25cm mit aktivem Timer
+            if (current_distance >= 25 && manual_fill_25cm_start_ms == 0 && !manual_mode) {
                 gpio_set_level(GPIO_VALVE_CONTROL, 0);
                 set_valve_and_manual_state(false, false);
                 finalize_active_valve_session(now_ms);
-                filling = false;
-                manual_mode = false;
-                last_progress_time_ms = 0;
-                last_no_progress_log_ms = 0;
-                progress_reference_distance = 0;
-                progress_candidate_distance = 0;
-                progress_confirmation_count = 0;
+                RESET_FILL_PROGRESS_VARS();
                 bottom_threshold_confirmation_count = 0;
                 ESP_LOGW(TAG, "🚰 Valve CLOSED - 25cm safety limit reached (distance=%u cm)", current_distance);
                 last_tank_state = 0;
                 vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
                 continue;
+            }
+
+            // Manuelles Befüllen bei 25cm: Überwachung und OBEN-Prüfung
+            if (manual_fill_25cm_start_ms > 0) {
+                uint64_t elapsed = now_ms - manual_fill_25cm_start_ms;
+
+                // Manuelles Stoppen
+                if (!state_snapshot.manual_fill_active) {
+                    ESP_LOGW(TAG, "🚰 Manual fill stopped by user - closing valve");
+                    gpio_set_level(GPIO_VALVE_CONTROL, 0);
+                    set_valve_and_manual_state(false, false);
+                    finalize_active_valve_session(now_ms);
+                    RESET_FILL_PROGRESS_VARS();
+                    manual_fill_25cm_start_ms = 0;
+                    manual_fill_25cm_oben_confirmation_count = 0;
+                } else if (current_distance <= state_snapshot.manual_fill_25cm_stop_threshold_cm) {
+                    // Stop-Schwellenwert erreicht (z.B. 23cm): Sofort stoppen
+                    ESP_LOGW(TAG, "🚰 Manual fill reached stop threshold (%d cm) - closing valve (dist=%d)", state_snapshot.manual_fill_25cm_stop_threshold_cm, current_distance);
+                    gpio_set_level(GPIO_VALVE_CONTROL, 0);
+                    set_valve_and_manual_state(false, false);
+                    finalize_active_valve_session(now_ms);
+                    RESET_FILL_PROGRESS_VARS();
+                    manual_fill_25cm_start_ms = 0;
+                    manual_fill_25cm_oben_confirmation_count = 0;
+                    fill_stop_cooldown_ms = now_ms;  // Cooldown starten
+                } else if (current_distance < 25) {
+                    // Wert < 25 aber > Stop-Schwellenwert: Timer zurücksetzen, normale Logik gilt
+                    manual_fill_25cm_start_ms = 0;
+                    manual_fill_25cm_oben_confirmation_count = 0;
+                    ESP_LOGI(TAG, "✅ Manual fill below 25cm - normal operation (dist=%d)", current_distance);
+                } else if (current_distance <= state_snapshot.threshold_top) {
+                    // OBEN-Schwellenwert erreicht: Bestätigung zählen
+                    manual_fill_25cm_oben_confirmation_count++;
+                    if (manual_fill_25cm_oben_confirmation_count >= 3) {
+                        ESP_LOGW(TAG, "🚰 Manual fill reached OBEN threshold (3 confirmations) - closing valve (dist=%d)", current_distance);
+                        gpio_set_level(GPIO_VALVE_CONTROL, 0);
+                        set_valve_and_manual_state(false, false);
+                        finalize_active_valve_session(now_ms);
+                        RESET_FILL_PROGRESS_VARS();
+                        manual_fill_25cm_start_ms = 0;
+                        manual_fill_25cm_oben_confirmation_count = 0;
+                        fill_stop_cooldown_ms = now_ms;  // Cooldown starten
+                    }
+                } else if (elapsed >= state_snapshot.manual_fill_25cm_monitor_timeout_ms) {
+                    // Timeout als Fallback: Kein Stop-Schwellenwert erreicht innerhalb konfigurierbarer Zeit
+                    ESP_LOGW(TAG, "🚰 Manual fill 25cm timeout (%llu ms) - no stop threshold reached, closing valve (elapsed=%llu ms)", state_snapshot.manual_fill_25cm_monitor_timeout_ms, elapsed);
+                    gpio_set_level(GPIO_VALVE_CONTROL, 0);
+                    set_valve_and_manual_state(false, false);
+                    finalize_active_valve_session(now_ms);
+                    RESET_FILL_PROGRESS_VARS();
+                    manual_fill_25cm_start_ms = 0;
+                    manual_fill_25cm_oben_confirmation_count = 0;
+                }
             }
 
             if (last_distance_cm > 0 && current_distance + FILL_PROGRESS_MIN_DELTA_CM <= last_distance_cm) {
@@ -3395,7 +3509,6 @@ static void valve_task(void *pvParameters)
 
                 if (progress_confirmation_count >= FILL_PROGRESS_CONFIRM_SAMPLES) {
                     progress_reference_distance = progress_candidate_distance;
-                    progress_candidate_distance = progress_reference_distance;
                     progress_confirmation_count = 0;
                     ESP_LOGI(TAG, "📉 Fill progress confirmed: %u cm", progress_reference_distance);
                 }
@@ -3411,13 +3524,7 @@ static void valve_task(void *pvParameters)
                         ? "No fill progress during manual fill: distance did not decrease sufficiently within timeout"
                         : "No fill progress: distance did not decrease sufficiently within timeout");
                     finalize_active_valve_session(now_ms);
-                    filling = false;
-                    manual_mode = false;
-                    last_progress_time_ms = 0;
-                    last_no_progress_log_ms = 0;
-                    progress_reference_distance = 0;
-                    progress_candidate_distance = 0;
-                    progress_confirmation_count = 0;
+                    RESET_FILL_PROGRESS_VARS();
                     ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", sys_state.emergency_stop_reason);
                     last_tank_state = current_tank_state;
                     vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
@@ -3444,14 +3551,7 @@ static void valve_task(void *pvParameters)
                 gpio_set_level(GPIO_VALVE_CONTROL, 0);  // Close valve
                 set_valve_and_manual_state(false, false);
                 finalize_active_valve_session(now_ms);
-                filling = false;
-                manual_mode = false;
-                last_progress_time_ms = 0;
-                last_no_progress_log_ms = 0;
-                progress_reference_distance = 0;
-                progress_candidate_distance = 0;
-                progress_confirmation_count = 0;
-                last_distance_cm = 0;
+                RESET_FILL_PROGRESS_VARS();
                 ESP_LOGW(TAG, "⚠️  TIMEOUT! Valve CLOSED - fill time exceeded %d ms", 
                         state_snapshot.timeout_max);
                 // Note: Not calling emergency stop, just safety closure
@@ -3521,7 +3621,7 @@ static void wifi_task(void *pvParameters)
     ESP_LOGI(TAG, "WiFi management task started");
     
     while (1) {
-        uint32_t now = esp_timer_get_time() / 1000;
+        uint64_t now = esp_timer_get_time() / 1000;
         wifi_state_t wifi_snapshot;
         get_wifi_state_snapshot(&wifi_snapshot);
         
@@ -3803,6 +3903,20 @@ void app_main(void)
     // ota_state_mutex bereits am Anfang von app_main initialisiert
     ESP_LOGI(TAG, "   ✓ sys_state mutex created");
     
+    // Load OTA last_result_ok from NVS for health-check after reboot
+    {
+        uint32_t ota_nvs_result = 0;
+        if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_OTA_LAST_RESULT_OK, &ota_nvs_result) == ESP_OK && ota_nvs_result == 1) {
+            xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
+            ota_state.last_result_ok = true;
+            xSemaphoreGive(ota_state_mutex);
+            // Clear NVS flag so health-check only runs once after OTA
+            nvs_set_u32(sys_state.nvs_handle, NVS_KEY_OTA_LAST_RESULT_OK, 0);
+            nvs_commit(sys_state.nvs_handle);
+            ESP_LOGI(TAG, "   OTA health-check enabled (last OTA was successful)");
+        }
+    }
+    
     ESP_LOGI(TAG, "   → Testing I2C init...");
     ret = init_i2c();
     ESP_LOGI(TAG, "     I2C result: %s (0x%X)", esp_err_to_name(ret), ret);
@@ -3828,16 +3942,7 @@ void app_main(void)
     
     ESP_LOGI(TAG, "✅ Hardware initialized successfully");
     
-    // Configure FreeRTOS Watchdog - will feed from sensor and valve tasks
-    // Note: v6.0 initializes TWDT automatically, don't call init again!
-    // Just reconfigure if needed
-    __attribute__((unused)) esp_task_wdt_config_t wdt_config = {
-        .timeout_ms = 10000,  // 10 second timeout (10000 ms)
-        .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,  // Monitor all cores
-        .trigger_panic = true,  // Panic instead of reboot
-    };
-    // Don't init, just reconfigure - watchdog is auto-initialized in v6.0
-    // ESP_ERROR_CHECK(esp_task_wdt_init(&wdt_config));
+    // Watchdog: v6.0 initialisiert TWDT automatisch, kein manuelles Init noetig
     ESP_LOGI(TAG, "   → Watchdog already initialized by framework, skipping re-init");
     
     // Start FreeRTOS tasks
@@ -4033,7 +4138,7 @@ void app_main(void)
     task_result = xTaskCreatePinnedToCore(
         ota_health_check_task,
         "ota_health_check_task",
-        6144,
+        TASK_STACK_OTA_HEALTH_CHECK,
         NULL,
         TASK_PRIO_MAIN,
         NULL,
@@ -4042,7 +4147,7 @@ void app_main(void)
     if (task_result != pdPASS) {
         ESP_LOGW(TAG, "⚠️ Failed to create ota_health_check_task - OTA recovery disabled");
     } else {
-        ESP_LOGI(TAG, "   ✓ ota_health_check_task (priority %d, stack %d bytes, core %d)", TASK_PRIO_MAIN, 6144, TASK_CORE_NETWORK);
+        ESP_LOGI(TAG, "   ✓ ota_health_check_task (priority %d, stack %d bytes, core %d)", TASK_PRIO_MAIN, TASK_STACK_OTA_HEALTH_CHECK, TASK_CORE_NETWORK);
     }
     
     ESP_LOGI(TAG, "✅ All tasks created and running");

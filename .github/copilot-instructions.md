@@ -11,14 +11,6 @@
 ### Version Control
 - **/commit** — Stage changes, generate smart commit message, push to git
 
-## Supported Boards
-The template auto-supports 5 ESP32 variants:
-- **ESP32** (dual-core, 520KB SRAM + PSRAM)
-- **ESP32-S2** (single-core, 320KB SRAM)
-- **ESP32-S3** (dual-core, 512KB SRAM + PSRAM, USB)
-- **ESP32-C3** (single-core RISC-V, 400KB SRAM)
-- **ESP32-C6** (dual-core RISC-V, 512KB SRAM + PSRAM)
-
 ## Workflow
 ```
 1. Code change
@@ -29,9 +21,11 @@ The template auto-supports 5 ESP32 variants:
 ```
 
 ## Documentation
-- See `README.md` for build, flash, OTA workflow, and operational usage
-- See `PROJECT.md` for the current project specification and hardware/runtime details
-- See `archive/phase3-reference/README.md` for historical Phase-3 context only
+- See `PROJECT.md` for hardware, API, features, and project specification
+- See `README.md` for build, flash, OTA workflow, and troubleshooting
+- See `include/config.h` for all configuration constants
+- See `flash.md` for detailed USB flash instructions
+- See `README_OTA_SAFETY.md` for OTA safety concepts
 
 ---
 Template Version: 0.1.0

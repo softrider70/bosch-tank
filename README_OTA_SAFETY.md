@@ -51,11 +51,12 @@ if (no_response_for_60_seconds) {
 - **Phy Init**: 0x2F0000-0x300000 (64KB)
 - **Factory**: 0x300000-0x3F0000 (960KB - Backup)
 
-### Stack-Sizes (erhöht für Stabilität):
-- Sensor: 6144 bytes (+50%)
-- Valve: 3072 bytes (+50%)
-- Server: 12288 bytes (+50%)
-- WiFi: 12288 bytes (+50%)
+### Stack-Sizes (aktuell, siehe config.h):
+- Sensor: 8192 bytes
+- Valve: 4096 bytes
+- Server: 16384 bytes
+- WiFi: 16384 bytes
+- Touch: 6144 bytes
 
 ## Best Practices für OTA
 

@@ -52,12 +52,12 @@
 #define TASK_SENSOR_INTERVAL_MS         250     // Task delay für sensor_task
 
 // Touch-Key fuer manuelles Befuellen
-#define TOUCH_KEY_SAMPLE_MS             60      // Polling fuer Touch-Erkennung
+#define TOUCH_KEY_SAMPLE_MS             30      // Polling fuer Touch-Erkennung (schnellere Reaktion)
 #define TOUCH_KEY_FILTER_PERIOD_MS      10      // IIR Filter-Zyklus
 #define TOUCH_KEY_CALIBRATION_SAMPLES   12      // Messungen fuer Start-Baseline
-#define TOUCH_KEY_THRESHOLD_PERCENT     75      // Touch erkannt unter 75% der Basislinie
-#define TOUCH_KEY_DEBOUNCE_COUNT        2       // Touch muss 2 Samples stabil sein
-#define TOUCH_KEY_RELEASE_COUNT         2       // Release muss 2 Samples stabil sein
+#define TOUCH_KEY_THRESHOLD_PERCENT     70      // Touch erkannt unter 70% der Basislinie (empfindlicher)
+#define TOUCH_KEY_DEBOUNCE_COUNT        3       // Touch muss 3 Samples stabil sein (stabilere Erkennung)
+#define TOUCH_KEY_RELEASE_COUNT         3       // Release muss 3 Samples stabil sein (stabilere Release-Erkennung)
 
 // ============================================================================
 // Valve Control Configuration (Solenoid, via MOSFET)
@@ -72,6 +72,11 @@
 #define FILL_PROGRESS_MIN_DELTA_CM      1       // Mindestens 1 cm Verringerung
 #define FILL_PROGRESS_TIMEOUT_DEFAULT   8000    // Innerhalb von 8s muss Fortschritt sichtbar sein
 #define FILL_PROGRESS_CONFIRM_SAMPLES   3       // Fortschritt erst nach mehreren stabilen Samples bestaetigen
+
+// Cooldown und manuelle Befuellung bei 25cm
+#define FILL_STOP_COOLDOWN_MS           5000    // 5 Sekunden Beruhigungszeit nach OBEN
+#define MANUAL_FILL_25CM_MONITOR_MS     15000   // 15 Sekunden Ueberwachung auf Werte < 25 (Fallback)
+#define MANUAL_FILL_25CM_STOP_THRESHOLD_CM 23   // Stop bei diesem Wert (Default 23cm)
 
 // Ventil-PWM oder Digital
 #define VALVE_USE_PWM                   0       // 0: Digital (on/off), 1: PWM
@@ -93,6 +98,8 @@
 #define NVS_KEY_FILL_PROGRESS_TIMEOUT   "fill_prog_to"
 #define NVS_KEY_FLOW_RATE               "flow_rate_lpm"
 #define NVS_KEY_VALVE_OPEN_COUNT        "valve_opens"
+#define NVS_KEY_25CM_STOP_THRESHOLD     "25cm_stop"      // Stop-Schwellenwert bei manueller Befuellung
+#define NVS_KEY_25CM_MONITOR_TIMEOUT    "25cm_timeout"   // Monitor-Timeout als Fallback
 #define NVS_KEY_EMERGENCY_COUNT         "emerg_count"
 #define NVS_KEY_TOTAL_OPEN_TIME_MS      "open_time_ms"
 #define NVS_KEY_TOTAL_LITERS_CENTI      "tot_liters_cl"
@@ -190,6 +197,7 @@
 #define TASK_STACK_WIFI                 16384   // Increased from 4096 for complex initialization
 #define TASK_STACK_TOUCH                6144    // Touch-Key Polling
 #define TASK_STACK_STACK_MONITOR        6144    // Stack-Überwachung für Laufzeitwarnungen
+#define TASK_STACK_OTA_HEALTH_CHECK    6144    // OTA Health-Check nach Firmware-Update
 
 // Task Intervals
 // (Already defined in Task Configuration section above)

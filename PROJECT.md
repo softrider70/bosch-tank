@@ -11,7 +11,7 @@ description: |
   Hinweis: Bosch-Tank soll funktional eng an delonghi-tank angelehnt bleiben und möglichst dieselben Features erhalten.
 
 target_board: esp32  # ESP32-DEVKITC-V4 (38-pin)
-target_version: ESP-IDF 6.0.0
+target_version: ESP-IDF 6.1
 
 active_runtime:
   entrypoint: components/main/main.c
