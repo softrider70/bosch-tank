@@ -48,6 +48,28 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
 - Notaus schliesst das Ventil sofort und beendet manuelle Befuellung
 - Fehlergrund fuer den Notaus wird im Status ausgeliefert
 
+### Touch-Key (GPIO 27, T7)
+
+Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
+
+**4 Touch-Funktionen:**
+
+1. **Kurzer Press** (< 500ms) → Toggle manuelles Befüllen
+   - Einmal berühren: Befüllen starten
+   - Zweimal berühren: Befüllen stoppen
+
+2. **Doppelpress** (zwei kurze Pressen innerhalb 500ms) → Notaus auslösen
+   - Zweck: Wassertank kann entfernt werden, ohne dass Wasser ausgelöst wird
+   - Schließt das Ventil sofort und setzt den persistenten Notaus-Status
+
+3. **Langes Pressen** (≥ 5 Sekunden) → Notaus zurücksetzen
+   - Zweck: Notaus kann wieder aufgehoben werden
+   - Setzt den persistenten Notaus-Status zurück
+
+4. **Stuck-Detection** (≥ 10 Sekunden dauerhaft aktiv) → Baseline-Rekalibrierung
+   - Zweck: Behebt "nur erste Berührungen" durch Drift-Kompensation
+   - Baseline wird auf aktuellen Wert neu kalibriert
+
 ### Konfiguration und Persistenz
 
 - Persistente Speicherung von:
@@ -59,7 +81,7 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
     - WiFi-Credentials
     - Notaus-Status
 - Durchflusswert ist als konfigurierbarer Parameter vorhanden
-- Standardwert fuer Durchfluss: 10.0 L/min
+- Standardwert fuer Durchfluss: 1.0 L/min
 
 ### Web-UI
 
@@ -248,12 +270,19 @@ Was der OTA-Modus automatisch macht:
 
 **Konfiguration (dauerhaft):**
 - Server-IP: `192.168.1.191`
-- Port: `80`
-- Firmware-URL: `http://192.168.1.191/bosch-tank.bin`
+- Port: `8070` (kein Admin nötig auf Windows)
+- Firmware-URL: `http://192.168.1.191:8070/bosch-tank.bin`
 
-**Server starten (im Hintergrund):**
+**Automatischer Start durch Build-Skript:**
+Das Build-Skript `tools/build-and-commit.ps1` startet den OTA-Server automatisch nach jedem Build:
+- Prüft, ob der Server bereits läuft
+- Testet, ob der Server antwortet (HTTP HEAD auf `/bosch-tank.bin`)
+- Startet den Server bei Bedarf im Hintergrund (nicht blockend)
+- Firmware ist sofort unter `http://192.168.1.191:8070/bosch-tank.bin` erreichbar
+
+**Manueller Start (falls nötig):**
 ```powershell
-cd build && python -m http.server 80
+cd build && python -m http.server 8070
 ```
 
 Alternativ mit `tools/serve_bin.py`:
@@ -261,7 +290,7 @@ Alternativ mit `tools/serve_bin.py`:
 python tools/serve_bin.py
 ```
 
-Dann ist die Firmware unter `http://192.168.1.191/bosch-tank.bin` erreichbar und kann direkt in der Web-UI oder per `POST /api/ota/start` verwendet werden.
+Die Web-UI Diagnose-Tab ist voreingestellt auf Port 8070 – OTA kann direkt gestartet werden.
 
 ## Entwickler-Tools & Wartung
 
