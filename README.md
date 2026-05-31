@@ -61,6 +61,7 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
 2. **Doppelpress** (zwei kurze Pressen innerhalb 500ms) → Notaus auslösen
    - Zweck: Wassertank kann entfernt werden, ohne dass Wasser ausgelöst wird
    - Schließt das Ventil sofort und setzt den persistenten Notaus-Status
+   - Visuelle Bestätigung: Ventil schaltet kurz an/aus (200ms)
 
 3. **Langes Pressen** (≥ 5 Sekunden) → Notaus zurücksetzen
    - Zweck: Notaus kann wieder aufgehoben werden
