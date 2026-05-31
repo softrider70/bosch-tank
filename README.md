@@ -74,6 +74,24 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
    - Zweck: Behebt "nur erste Berührungen" durch Drift-Kompensation
    - Baseline wird auf aktuellen Wert neu kalibriert
 
+### WiFi-Sleep-Mode (Stromsparfunktion)
+
+- **Zeitgesteuerte WiFi-Deaktivierung** mit konfigurierbarem Zeitfenster (Default: 19:00-05:00)
+- WiFi wird im Sleep-Zeitfenster deaktiviert, wenn:
+  - Wasserstand >= OBEN (Tank voll)
+  - Ventil geschlossen
+  - Tank für 5 Minuten voll war (Hysterese gegen Flackern)
+- WiFi bleibt aktiv, wenn:
+  - Wasserstand < OBEN (Tank nicht voll)
+  - Ventil offen (Befüllen läuft)
+- Aufwecken durch:
+  - Automatisch: Wenn Wasserstand unter OBEN sinkt
+  - Manuell: Touch-Key (Dreifach-Press)
+- Außerhalb des Zeitfensters (05:00-19:00) ist WiFi immer aktiv
+- **LED-Indikator:** Status-LED blinkt langsam bei WiFi-Sleep-Mode und bei Notaus
+- Konfiguration über Web-UI (Start/Endzeit)
+- Validierung: 0-23, Start != End
+
 ### Konfiguration und Persistenz
 
 - Persistente Speicherung von:
