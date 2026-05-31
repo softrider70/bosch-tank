@@ -33,10 +33,13 @@ Die vorherige Phase-3-Aufteilung auf mehrere Referenzdateien wurde archiviert un
 ### Tank- und Ventillogik
 
 - VL6150X/VL6180X-kompatible ToF-Abstandsmessung ueber I2C
+- **Sensor-Begrenzung:** Der Sensor misst nur bis ca. 18cm zuverlässig. Werte darueber werden als 25cm angezeigt (Sicherheitsgrenze)
 - Automatische Befuellung zwischen OBEN- und UNTEN-Schwelle
+- **UNTEN-Schwellenwert-Bestätigung:** 7 aufeinanderfolgende Messungen (1750 ms) erforderlich, um Flackern durch Sensorrauschen zu verhindern
 - Beim Erreichen des OBEN-Wertes wird das Befuellen gestoppt; das System muss nicht exakt auf dem Wert halten
-- Der BEFUELLEN-Button kann nur gestartet werden, solange der aktuelle Messwert groesser als der OBEN-Schwellenwert ist
+- Der BEFUELLEN-Button kann nur gestartet werden, solange der aktuelle Messwert groesser als dem OBEN-Schwellenwert ist
 - Manuelles Befuellen ueber Web-UI und API
+- **Manuelle Füllung bei 25cm:** Sonderbehandlung für Sensorwerte ≥ 25cm (über Sicherheitsgrenze) mit 15s-Timeout und Stop-Schwellenwerten
 - Sicherheitsabschaltung ueber maximale Ventil-Offenzeit
 - Zusaetzlicher Fortschritts-Timeout fuer automatische Befuellung
 - Keine falsche Notaus-Ausloesung mehr bei manuellem Befuellen ohne Fortschrittsdelta
