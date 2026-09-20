@@ -1,31 +1,27 @@
-# Copilot Configuration for ESP32 Template
+# Copilot-Instruktionen – bosch-tank
 
-## Skills (Automation)
+**Projekt:** Automatisches Wassertank-Management fuer eine Kaffeemaschine (Bosch).
+ESP32-Firmware mit Fuellstandsmessung per ToF-Sensor (VL6150X/VL6180X),
+Ventilsteuerung ueber ein ILN44Z-Relaismodul (12 V, Schaltung gegen Masse,
+1 Ohm zur Strombegrenzung), WLAN-Weboberflaeche, NVS-Konfiguration und Notaus.
 
-### Build & Upload
-- **/build-project** — Compile the project, generate `${PROJECT_NAME}.bin`
-- **/upload** — Smart router (first-time setup vs. update)
-- **/upload-firmware** — Fast app-only update (~3 seconds)
-- **/initial-upload** — Full bootloader + partition + app (~20 seconds, one-time setup)
+## Wichtig fuer die Zusammenarbeit
 
-### Version Control
-- **/commit** — Stage changes, generate smart commit message, push to git
+- **Sprache ist Deutsch** - Antworten, Kommentare und Doku.
+- Kurze Saetze, Fachwoerter erklaeren, keine Vermutungen: pruefen statt raten.
+- Nach jeder Aenderung **bauen und flashen**, dann die Ausgabe im Log pruefen.
 
-## Workflow
-```
-1. Code change
-2. /build-project       (compile and commit build metadata)
-3. /upload-firmware     (fast upload)
-4. (watch output)
-5. /commit              (save to git)
-```
+## Bauen und flashen
 
-## Documentation
-- See `PROJECT.md` for hardware, API, features, and project specification
-- See `README.md` for build, flash, OTA workflow, and troubleshooting
-- See `include/config.h` for all configuration constants
-- See `flash.md` for detailed USB flash instructions
-- See `README_OTA_SAFETY.md` for OTA safety concepts
+ESP-IDF (6.1) vorher aktivieren, PATH danach aufraeumen, dann im Projektordner:
+`idf.py -p COMx flash`  (COM-Nummer kann sich beim Umstecken aendern)
 
----
-Template Version: 0.1.0
+## Wo was steht
+
+- `include/config.h` - alle Pins und Parameter
+- `PROJECT.md` - Projektspezifikation
+- `README.md` - Bauen, OTA-Ablauf, Fehlersuche
+- `flash.md` - Anleitung zum Flashen per USB
+- `README_OTA_SAFETY.md` - Sicherheit bei Firmware-Updates
+
+Schwesterprojekt: `../delonghi-tank` (gleiche Grundarchitektur, andere Hardware).
