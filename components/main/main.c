@@ -102,6 +102,10 @@ typedef struct {
     uint32_t last_update_timestamp;
     uint32_t manual_fill_25cm_stop_threshold_cm;  // Stop-Schwellenwert bei manueller Befuellung (Default 23)
     uint32_t manual_fill_25cm_monitor_timeout_ms;  // Monitor-Timeout als Fallback (Default 15000)
+    uint32_t wifi_sleep_start_hour;  // WiFi-Sleep Start-Stunde (0-23)
+    uint32_t wifi_sleep_end_hour;  // WiFi-Sleep End-Stunde (0-23)
+    bool wifi_sleep_active;  // WiFi ist im Sleep-Mode
+    uint64_t wifi_sleep_hysteresis_start_ms;  // Startzeit der Hysterese-Prüfung
 } system_state_t;
 
 static system_state_t sys_state = {
@@ -129,7 +133,11 @@ static system_state_t sys_state = {
     .current_valve_open_start_ms = 0,
     .last_update_timestamp = 0,
     .manual_fill_25cm_stop_threshold_cm = MANUAL_FILL_25CM_STOP_THRESHOLD_CM,
-    .manual_fill_25cm_monitor_timeout_ms = MANUAL_FILL_25CM_MONITOR_MS
+    .manual_fill_25cm_monitor_timeout_ms = MANUAL_FILL_25CM_MONITOR_MS,
+    .wifi_sleep_start_hour = WIFI_SLEEP_START_HOUR_DEFAULT,
+    .wifi_sleep_end_hour = WIFI_SLEEP_END_HOUR_DEFAULT,
+    .wifi_sleep_active = false,
+    .wifi_sleep_hysteresis_start_ms = 0
 };
 
 // Mutex for sys_state access
@@ -211,6 +219,7 @@ static ota_state_t ota_state = {
 static void get_system_state_snapshot(system_state_t *snapshot);
 static void set_manual_fill_active(bool active);
 static esp_err_t request_manual_fill(bool enable, const char *source, bool *manual_fill_active_out, const char **message_out);
+static void trigger_emergency_stop(const char *reason);
 static void ota_update_task(void *pvParameters);
 static void ota_health_check_task(void *pvParameters);
 
@@ -277,14 +286,56 @@ static esp_err_t init_nvs(void)
     // Load 25cm manual fill parameters
     uint32_t stored_25cm_stop_threshold = 0;
     if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_25CM_STOP_THRESHOLD, &stored_25cm_stop_threshold) == ESP_OK) {
-        sys_state.manual_fill_25cm_stop_threshold_cm = stored_25cm_stop_threshold;
-        ESP_LOGI(TAG, "Loaded manual_fill_25cm_stop_threshold_cm from NVS: %d cm", stored_25cm_stop_threshold);
+        if (stored_25cm_stop_threshold > 0) {
+            sys_state.manual_fill_25cm_stop_threshold_cm = stored_25cm_stop_threshold;
+            ESP_LOGI(TAG, "Loaded manual_fill_25cm_stop_threshold_cm from NVS: %d cm", stored_25cm_stop_threshold);
+        }
     }
 
     uint32_t stored_25cm_monitor_timeout = 0;
     if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_25CM_MONITOR_TIMEOUT, &stored_25cm_monitor_timeout) == ESP_OK) {
-        sys_state.manual_fill_25cm_monitor_timeout_ms = stored_25cm_monitor_timeout;
-        ESP_LOGI(TAG, "Loaded manual_fill_25cm_monitor_timeout_ms from NVS: %d ms", stored_25cm_monitor_timeout);
+        if (stored_25cm_monitor_timeout > 0) {
+            sys_state.manual_fill_25cm_monitor_timeout_ms = stored_25cm_monitor_timeout;
+            ESP_LOGI(TAG, "Loaded manual_fill_25cm_monitor_timeout_ms from NVS: %d ms", stored_25cm_monitor_timeout);
+        }
+    }
+
+    // Load WiFi-Sleep parameters mit Validierung
+    uint32_t stored_wifi_sleep_start_hour = 0;
+    if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_WIFI_SLEEP_START_HOUR, &stored_wifi_sleep_start_hour) == ESP_OK) {
+        if (stored_wifi_sleep_start_hour <= 23) {
+            sys_state.wifi_sleep_start_hour = stored_wifi_sleep_start_hour;
+            ESP_LOGI(TAG, "Loaded wifi_sleep_start_hour from NVS: %d", stored_wifi_sleep_start_hour);
+        } else {
+            ESP_LOGW(TAG, "Invalid wifi_sleep_start_hour from NVS: %d (using default %d)", stored_wifi_sleep_start_hour, WIFI_SLEEP_START_HOUR_DEFAULT);
+            sys_state.wifi_sleep_start_hour = WIFI_SLEEP_START_HOUR_DEFAULT;
+        }
+    } else {
+        // NVS key nicht vorhanden - Default verwenden
+        sys_state.wifi_sleep_start_hour = WIFI_SLEEP_START_HOUR_DEFAULT;
+        ESP_LOGI(TAG, "wifi_sleep_start_hour not in NVS, using default: %d", WIFI_SLEEP_START_HOUR_DEFAULT);
+    }
+
+    uint32_t stored_wifi_sleep_end_hour = 0;
+    if (nvs_get_u32(sys_state.nvs_handle, NVS_KEY_WIFI_SLEEP_END_HOUR, &stored_wifi_sleep_end_hour) == ESP_OK) {
+        if (stored_wifi_sleep_end_hour <= 23) {
+            sys_state.wifi_sleep_end_hour = stored_wifi_sleep_end_hour;
+            ESP_LOGI(TAG, "Loaded wifi_sleep_end_hour from NVS: %d", stored_wifi_sleep_end_hour);
+        } else {
+            ESP_LOGW(TAG, "Invalid wifi_sleep_end_hour from NVS: %d (using default %d)", stored_wifi_sleep_end_hour, WIFI_SLEEP_END_HOUR_DEFAULT);
+            sys_state.wifi_sleep_end_hour = WIFI_SLEEP_END_HOUR_DEFAULT;
+        }
+    } else {
+        // NVS key nicht vorhanden - Default verwenden
+        sys_state.wifi_sleep_end_hour = WIFI_SLEEP_END_HOUR_DEFAULT;
+        ESP_LOGI(TAG, "wifi_sleep_end_hour not in NVS, using default: %d", WIFI_SLEEP_END_HOUR_DEFAULT);
+    }
+
+    // Prüfen, dass Start und End nicht gleich sind
+    if (sys_state.wifi_sleep_start_hour == sys_state.wifi_sleep_end_hour) {
+        ESP_LOGW(TAG, "wifi_sleep_start_hour == wifi_sleep_end_hour (%d), using defaults", sys_state.wifi_sleep_start_hour);
+        sys_state.wifi_sleep_start_hour = WIFI_SLEEP_START_HOUR_DEFAULT;
+        sys_state.wifi_sleep_end_hour = WIFI_SLEEP_END_HOUR_DEFAULT;
     }
 
     uint32_t stored_valve_open_count = 0;
@@ -453,10 +504,13 @@ static void touch_key_task(void *pvParameters)
     bool touch_active = false;
     uint8_t touch_samples = 0;
     uint8_t release_samples = 0;
+    uint8_t press_count = 0;
+    uint64_t last_press_time_ms = 0;
 
     while (1) {
         uint16_t touch_value = 0;
         esp_err_t ret = touch_pad_read_filtered(TOUCH_KEY_PAD, &touch_value);
+        uint64_t now_ms = esp_timer_get_time() / 1000;
 
         if (ret == ESP_OK && touch_value > 0 && touch_key_baseline > 0) {
             uint16_t threshold = (uint16_t)((touch_key_baseline * TOUCH_KEY_THRESHOLD_PERCENT) / 100U);
@@ -483,21 +537,77 @@ static void touch_key_task(void *pvParameters)
                 touch_samples = 0;
 
                 if (touch_active && release_samples >= TOUCH_KEY_RELEASE_COUNT) {
-                    system_state_t state_snapshot;
-                    bool manual_fill_active = false;
-                    const char *message = NULL;
-
                     touch_active = false;
-                    get_system_state_snapshot(&state_snapshot);
-                    esp_err_t request_err = request_manual_fill(!state_snapshot.manual_fill_active,
-                        "Touch key", &manual_fill_active, &message);
+                    press_count++;
 
-                    if (request_err == ESP_OK) {
-                        ESP_LOGI(TAG, "Touch key action: %s (manual_fill_active=%d)",
-                                 message ? message : "OK", manual_fill_active);
+                    // Zeit seit letztem Press prüfen
+                    if (now_ms - last_press_time_ms > TOUCH_KEY_DOUBLE_PRESS_MS) {
+                        press_count = 1;  // Reset wenn zu lange Zeit vergangen
+                    }
+                    last_press_time_ms = now_ms;
+
+                    // Warten auf weitere Presses (Timeout für Dreifach-Press)
+                    vTaskDelay(pdMS_TO_TICKS(TOUCH_KEY_DOUBLE_PRESS_MS));
+
+                    // Prüfen, ob weitere Presses innerhalb des Zeitfensters
+                    if (press_count >= 3) {
+                        // Dreifach-Press: WiFi aufwecken
+                        system_state_t state_snapshot;
+                        get_system_state_snapshot(&state_snapshot);
+
+                        if (state_snapshot.wifi_sleep_active) {
+                            ESP_LOGI(TAG, "🌅 Touch key: Dreifach-Press - WiFi aufwecken");
+                            esp_wifi_start();
+                            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                            sys_state.wifi_sleep_active = false;
+                            sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                            xSemaphoreGive(sys_state_mutex);
+                        } else {
+                            ESP_LOGI(TAG, "Touch key: Dreifach-Press - WiFi bereits aktiv");
+                        }
+                        press_count = 0;
+                    } else if (press_count == 2) {
+                        // Doppelpress: Notaus auslösen
+                        system_state_t state_snapshot;
+                        get_system_state_snapshot(&state_snapshot);
+
+                        if (!state_snapshot.emergency_stop_active) {
+                            ESP_LOGI(TAG, "🚨 Touch key: Doppelpress - Notaus auslösen");
+                            trigger_emergency_stop("Touch key double press");
+                        } else {
+                            ESP_LOGI(TAG, "Touch key: Doppelpress - Notaus bereits aktiv");
+                        }
+                        press_count = 0;
                     } else {
-                        ESP_LOGW(TAG, "Touch key ignored: %s",
-                                 message ? message : esp_err_to_name(request_err));
+                        // Einfacher Press: Zuerst WiFi aufwecken, dann manuelles Befüllen umschalten
+                        system_state_t state_snapshot;
+                        get_system_state_snapshot(&state_snapshot);
+
+                        if (state_snapshot.wifi_sleep_active) {
+                            // WiFi aus Sleep wecken
+                            ESP_LOGI(TAG, "🌅 Touch key: Einfacher Press - WiFi aufwecken");
+                            esp_wifi_start();
+                            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                            sys_state.wifi_sleep_active = false;
+                            sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                            xSemaphoreGive(sys_state_mutex);
+                        } else {
+                            // Manuelles Befüllen umschalten
+                            bool manual_fill_active = false;
+                            const char *message = NULL;
+
+                            esp_err_t request_err = request_manual_fill(!state_snapshot.manual_fill_active,
+                                "Touch key", &manual_fill_active, &message);
+
+                            if (request_err == ESP_OK) {
+                                ESP_LOGI(TAG, "Touch key action: %s (manual_fill_active=%d)",
+                                         message ? message : "OK", manual_fill_active);
+                            } else {
+                                ESP_LOGW(TAG, "Touch key ignored: %s",
+                                         message ? message : esp_err_to_name(request_err));
+                            }
+                        }
+                        press_count = 0;
                     }
                 }
             }
@@ -891,7 +1001,7 @@ static void begin_valve_session(uint64_t start_time_ms, bool manual_fill_active)
     xSemaphoreGive(sys_state_mutex);
 }
 
-static void update_runtime_config(uint32_t top, uint32_t bottom, uint32_t timeout, uint32_t fill_progress_timeout, float flow_rate, uint32_t manual_fill_25cm_stop_threshold, uint32_t manual_fill_25cm_monitor_timeout)
+static void update_runtime_config(uint32_t top, uint32_t bottom, uint32_t timeout, uint32_t fill_progress_timeout, float flow_rate, uint32_t manual_fill_25cm_stop_threshold, uint32_t manual_fill_25cm_monitor_timeout, uint32_t wifi_sleep_start_hour, uint32_t wifi_sleep_end_hour)
 {
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
     sys_state.threshold_top = top;
@@ -904,6 +1014,12 @@ static void update_runtime_config(uint32_t top, uint32_t bottom, uint32_t timeou
     }
     if (manual_fill_25cm_monitor_timeout > 0) {
         sys_state.manual_fill_25cm_monitor_timeout_ms = manual_fill_25cm_monitor_timeout;
+    }
+    if (wifi_sleep_start_hour <= 23) {
+        sys_state.wifi_sleep_start_hour = wifi_sleep_start_hour;
+    }
+    if (wifi_sleep_end_hour <= 23) {
+        sys_state.wifi_sleep_end_hour = wifi_sleep_end_hour;
     }
     xSemaphoreGive(sys_state_mutex);
 }
@@ -1283,6 +1399,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"free_heap_bytes\":%d,"
         "\"uptime_ms\":%lld,"
         "\"wifi_connected\":%s,"
+        "\"wifi_sleep_active\":%s,"
         "\"stack_warning\":%s,"
         "\"stack_warning_message\":\"%s\","
         "\"cpu_core0_percent\":%lu,"
@@ -1319,6 +1436,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         free_mem,
         uptime_ms,
         wifi_snapshot.is_connected ? "true" : "false",
+        state_snapshot.wifi_sleep_active ? "true" : "false",
         state_snapshot.stack_warning_active ? "true" : "false",
         escaped_stack_warning_message,
         (unsigned long)cpu_core0_percent,
@@ -1357,7 +1475,9 @@ static esp_err_t config_get_handler(httpd_req_t *req)
         "  \"fill_progress_timeout_ms\":%u,"
         "  \"flow_rate_l_per_min\":%.2f,"
         "  \"manual_fill_25cm_stop_threshold_cm\":%u,"
-        "  \"manual_fill_25cm_monitor_timeout_ms\":%u"
+        "  \"manual_fill_25cm_monitor_timeout_ms\":%u,"
+        "  \"wifi_sleep_start_hour\":%u,"
+        "  \"wifi_sleep_end_hour\":%u"
         "}"
         "}",
         (unsigned int)state_snapshot.threshold_top,
@@ -1366,7 +1486,9 @@ static esp_err_t config_get_handler(httpd_req_t *req)
         (unsigned int)state_snapshot.fill_progress_timeout_ms,
         state_snapshot.flow_rate_l_per_min,
         (unsigned int)state_snapshot.manual_fill_25cm_stop_threshold_cm,
-        (unsigned int)state_snapshot.manual_fill_25cm_monitor_timeout_ms
+        (unsigned int)state_snapshot.manual_fill_25cm_monitor_timeout_ms,
+        (unsigned int)state_snapshot.wifi_sleep_start_hour,
+        (unsigned int)state_snapshot.wifi_sleep_end_hour
     );
     
     send_json_response(req, json_response);
@@ -1389,6 +1511,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     // Simple JSON parsing for thresholds
     int top = -1, bottom = -1, timeout = -1, fill_progress_timeout = -1;
     int manual_fill_25cm_stop_threshold = -1, manual_fill_25cm_monitor_timeout = -1;
+    int wifi_sleep_start_hour = -1, wifi_sleep_end_hour = -1;
     float flow_rate = -1.0f;
     bool has_top = parse_json_int_field(buf, "\"threshold_top_cm\"", &top);
     bool has_bottom = parse_json_int_field(buf, "\"threshold_bottom_cm\"", &bottom);
@@ -1397,13 +1520,18 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     bool has_flow_rate = parse_json_float_field(buf, "\"flow_rate_l_per_min\"", &flow_rate);
     bool has_25cm_stop = parse_json_int_field(buf, "\"manual_fill_25cm_stop_threshold_cm\"", &manual_fill_25cm_stop_threshold);
     bool has_25cm_timeout = parse_json_int_field(buf, "\"manual_fill_25cm_monitor_timeout_ms\"", &manual_fill_25cm_monitor_timeout);
+    bool has_wifi_sleep_start = parse_json_int_field(buf, "\"wifi_sleep_start_hour\"", &wifi_sleep_start_hour);
+    bool has_wifi_sleep_end = parse_json_int_field(buf, "\"wifi_sleep_end_hour\"", &wifi_sleep_end_hour);
 
     if (has_top && has_bottom && has_timeout && has_fill_progress_timeout && has_flow_rate &&
         top >= 0 && bottom >= 0 && timeout >= 0 && fill_progress_timeout >= 0 && flow_rate >= 0.0f) {
 
         if (top > 0 && top <= 30 && bottom > top && bottom <= 50 && timeout >= 1000 && fill_progress_timeout >= 1000 && flow_rate > 0.0f && flow_rate <= 50.0f &&
             (!has_25cm_stop || (manual_fill_25cm_stop_threshold >= 1 && manual_fill_25cm_stop_threshold <= 30)) &&
-            (!has_25cm_timeout || manual_fill_25cm_monitor_timeout >= 1000)) {
+            (!has_25cm_timeout || manual_fill_25cm_monitor_timeout >= 1000) &&
+            (!has_wifi_sleep_start || (wifi_sleep_start_hour >= 0 && wifi_sleep_start_hour <= 23)) &&
+            (!has_wifi_sleep_end || (wifi_sleep_end_hour >= 0 && wifi_sleep_end_hour <= 23)) &&
+            (!has_wifi_sleep_start || !has_wifi_sleep_end || wifi_sleep_start_hour != wifi_sleep_end_hour)) {
             esp_err_t nvs_err = ESP_OK;
             nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_THRESHOLD_TOP, top);
             if (nvs_err == ESP_OK) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_THRESHOLD_BOTTOM, bottom);
@@ -1412,6 +1540,8 @@ static esp_err_t config_post_handler(httpd_req_t *req)
             if (nvs_err == ESP_OK) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_FLOW_RATE, (uint32_t)(flow_rate * 100.0f));
             if (nvs_err == ESP_OK && has_25cm_stop) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_25CM_STOP_THRESHOLD, manual_fill_25cm_stop_threshold);
             if (nvs_err == ESP_OK && has_25cm_timeout) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_25CM_MONITOR_TIMEOUT, manual_fill_25cm_monitor_timeout);
+            if (nvs_err == ESP_OK && has_wifi_sleep_start) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_WIFI_SLEEP_START_HOUR, wifi_sleep_start_hour);
+            if (nvs_err == ESP_OK && has_wifi_sleep_end) nvs_err = nvs_set_u32(sys_state.nvs_handle, NVS_KEY_WIFI_SLEEP_END_HOUR, wifi_sleep_end_hour);
             if (nvs_err == ESP_OK) nvs_err = nvs_commit(sys_state.nvs_handle);
 
             if (nvs_err != ESP_OK) {
@@ -1420,7 +1550,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
                 return ESP_FAIL;
             }
 
-            update_runtime_config(top, bottom, timeout, fill_progress_timeout, flow_rate, manual_fill_25cm_stop_threshold, manual_fill_25cm_monitor_timeout);
+            update_runtime_config(top, bottom, timeout, fill_progress_timeout, flow_rate, manual_fill_25cm_stop_threshold, manual_fill_25cm_monitor_timeout, wifi_sleep_start_hour, wifi_sleep_end_hour);
             
             char response[256];
             snprintf(response, sizeof(response),
@@ -2347,6 +2477,11 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <input type="number" id="25cm-stop" min="1" max="30">
 <label for="25cm-timeout">Monitor-Timeout (ms):</label>
 <input type="number" id="25cm-timeout" min="1000" max="60000">
+<p style="font-size:12px;margin:10px 0 10px 0"><b>WiFi-Sleep-Mode (Stromsparfunktion):</b></p>
+<label for="wifi-sleep-start">Sleep Start (Stunde 0-23):</label>
+<input type="number" id="wifi-sleep-start" min="0" max="23">
+<label for="wifi-sleep-end">Sleep End (Stunde 0-23):</label>
+<input type="number" id="wifi-sleep-end" min="0" max="23">
 <div class="buttons">
 <button class="btn-success" id="save-btn" onclick="saveSettings()">Speichern</button>
 </div>
@@ -2392,7 +2527,7 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <div class="status-row"><span>Letztes Ergebnis:</span><span id="ota-last-result">-</span></div>
 <div style="margin-top:10px;padding-top:10px;border-top:1px solid #ddd">
 <label for="ota-url">Firmware-URL:</label>
-<input type="text" id="ota-url" value="http://192.168.1.191/bosch-tank.bin" placeholder="http://192.168.1.191/bosch-tank.bin">
+<input type="text" id="ota-url" value="http://192.168.1.191:8070/bosch-tank.bin" placeholder="http://192.168.1.191:8070/bosch-tank.bin">
 <div class="buttons"><button class="btn-success" id="ota-start-btn" onclick="startOTA()">OTA starten</button></div>
 <div style="margin-top:6px;font-size:11px;color:#6b7280">Voreingestellt auf Laptop-IP 192.168.1.191.</div>
 </div>
@@ -2422,7 +2557,7 @@ const OTA_BINARY_NAME = 'bosch-tank.bin';
 function setDefaultOtaUrl() {
     const input = document.getElementById('ota-url');
     if (!input) return;
-    input.value = `http://192.168.1.191/${OTA_BINARY_NAME}`;
+    input.value = `http://192.168.1.191:8070/${OTA_BINARY_NAME}`;
 }
 function scheduleDashboardRefresh(delay){
     if(dashboardTimer) clearTimeout(dashboardTimer);
@@ -2512,6 +2647,121 @@ function syncSaveButton(){
     btn.disabled = settingsSaveInFlight;
     btn.style.opacity = settingsSaveInFlight ? '0.6' : '1';
     btn.textContent = settingsSaveInFlight ? 'Speichert...' : 'Speichern';
+}
+function loadSettings(){
+    fetch('/api/config').then(r => {
+        if(!r.ok) throw new Error('API error: ' + r.status);
+        return r.json();
+    }).then(d => {
+        const cfg = d.config || {};
+        const topEl = document.getElementById('top');
+        const bottomEl = document.getElementById('bottom');
+        const timeoutEl = document.getElementById('timeout');
+        const fillProgressTimeoutEl = document.getElementById('fill-progress-timeout');
+        const flowRateEl = document.getElementById('flow-rate');
+        const stop25cmEl = document.getElementById('25cm-stop');
+        const timeout25cmEl = document.getElementById('25cm-timeout');
+        const wifiSleepStartEl = document.getElementById('wifi-sleep-start');
+        const wifiSleepEndEl = document.getElementById('wifi-sleep-end');
+        if(topEl) topEl.value = cfg.threshold_top_cm || '';
+        if(bottomEl) bottomEl.value = cfg.threshold_bottom_cm || '';
+        if(timeoutEl) timeoutEl.value = cfg.timeout_max_ms || '';
+        if(fillProgressTimeoutEl) fillProgressTimeoutEl.value = cfg.fill_progress_timeout_ms || '';
+        if(flowRateEl) flowRateEl.value = cfg.flow_rate_l_per_min || '';
+        if(stop25cmEl) stop25cmEl.value = cfg.manual_fill_25cm_stop_threshold_cm || '';
+        if(timeout25cmEl) timeout25cmEl.value = cfg.manual_fill_25cm_monitor_timeout_ms || '';
+        if(wifiSleepStartEl) wifiSleepStartEl.value = cfg.wifi_sleep_start_hour !== undefined ? cfg.wifi_sleep_start_hour : '';
+        if(wifiSleepEndEl) wifiSleepEndEl.value = cfg.wifi_sleep_end_hour !== undefined ? cfg.wifi_sleep_end_hour : '';
+    }).catch(e => {
+        console.error('loadSettings failed:', e);
+        showMsg('settings', 'Konfiguration konnte nicht geladen werden', true);
+    });
+}
+function saveSettings(){
+    const topEl = document.getElementById('top');
+    const bottomEl = document.getElementById('bottom');
+    const timeoutEl = document.getElementById('timeout');
+    const fillProgressTimeoutEl = document.getElementById('fill-progress-timeout');
+    const flowRateEl = document.getElementById('flow-rate');
+    const stop25cmEl = document.getElementById('25cm-stop');
+    const timeout25cmEl = document.getElementById('25cm-timeout');
+    const wifiSleepStartEl = document.getElementById('wifi-sleep-start');
+    const wifiSleepEndEl = document.getElementById('wifi-sleep-end');
+    const top = topEl ? parseInt(topEl.value) : null;
+    const bottom = bottomEl ? parseInt(bottomEl.value) : null;
+    const timeout = timeoutEl ? parseInt(timeoutEl.value) : null;
+    const fillProgressTimeout = fillProgressTimeoutEl ? parseInt(fillProgressTimeoutEl.value) : null;
+    const flowRate = flowRateEl ? parseFloat(flowRateEl.value) : null;
+    const stop25cm = stop25cmEl ? parseInt(stop25cmEl.value) : null;
+    const timeout25cm = timeout25cmEl ? parseInt(timeout25cmEl.value) : null;
+    const wifiSleepStart = wifiSleepStartEl ? parseInt(wifiSleepStartEl.value) : null;
+    const wifiSleepEnd = wifiSleepEndEl ? parseInt(wifiSleepEndEl.value) : null;
+    if(top === null || bottom === null || timeout === null || fillProgressTimeout === null || flowRate === null){
+        showMsg('settings', 'Bitte alle Pflichtfelder ausfuellen', true);
+        return;
+    }
+    if(top <= 0 || top > 30 || bottom <= top || bottom > 50){
+        showMsg('settings', 'Ungueltige Schwellenwerte (OBEN: 1-30, UNTEN: >OBEN bis 50)', true);
+        return;
+    }
+    if(timeout < 1000 || fillProgressTimeout < 1000){
+        showMsg('settings', 'Timeouts muessen mindestens 1000ms sein', true);
+        return;
+    }
+    if(flowRate <= 0 || flowRate > 50){
+        showMsg('settings', 'Durchfluss muss zwischen 0.1 und 50 L/min liegen', true);
+        return;
+    }
+    if(stop25cm !== null && (stop25cm < 1 || stop25cm > 30)){
+        showMsg('settings', '25cm Stop-Schwellenwert muss zwischen 1 und 30 liegen', true);
+        return;
+    }
+    if(timeout25cm !== null && timeout25cm < 1000){
+        showMsg('settings', '25cm Monitor-Timeout muss mindestens 1000ms sein', true);
+        return;
+    }
+    if(wifiSleepStart !== null && (wifiSleepStart < 0 || wifiSleepStart > 23)){
+        showMsg('settings', 'WiFi Sleep Start muss zwischen 0 und 23 liegen', true);
+        return;
+    }
+    if(wifiSleepEnd !== null && (wifiSleepEnd < 0 || wifiSleepEnd > 23)){
+        showMsg('settings', 'WiFi Sleep End muss zwischen 0 und 23 liegen', true);
+        return;
+    }
+    if(wifiSleepStart !== null && wifiSleepEnd !== null && wifiSleepStart === wifiSleepEnd){
+        showMsg('settings', 'WiFi Sleep Start und End duerfen nicht gleich sein', true);
+        return;
+    }
+    const payload = {
+        threshold_top_cm: top,
+        threshold_bottom_cm: bottom,
+        timeout_max_ms: timeout,
+        fill_progress_timeout_ms: fillProgressTimeout,
+        flow_rate_l_per_min: flowRate
+    };
+    if(stop25cm !== null) payload.manual_fill_25cm_stop_threshold_cm = stop25cm;
+    if(timeout25cm !== null) payload.manual_fill_25cm_monitor_timeout_ms = timeout25cm;
+    if(wifiSleepStart !== null) payload.wifi_sleep_start_hour = wifiSleepStart;
+    if(wifiSleepEnd !== null) payload.wifi_sleep_end_hour = wifiSleepEnd;
+    settingsSaveInFlight = true;
+    syncSaveButton();
+    fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+    }).then(async r => {
+        if(!r.ok) throw new Error(await r.text() || ('API error: ' + r.status));
+        return r.json();
+    }).then(d => {
+        showMsg('settings', d.message || 'Konfiguration gespeichert', false);
+        updateDashboard(true);
+    }).catch(e => {
+        console.error('saveSettings failed:', e);
+        showMsg('settings', 'Speichern fehlgeschlagen: ' + e.message, true);
+    }).finally(() => {
+        settingsSaveInFlight = false;
+        syncSaveButton();
+    });
 }
 function syncFillButton(){
     const btn = document.getElementById('fill-btn');
@@ -3401,9 +3651,22 @@ static void valve_task(void *pvParameters)
                         fill_stop_cooldown_ms = now_ms;  // Cooldown starten
                         ESP_LOGI(TAG, "🚰 Valve CLOSED - Tank is FULL (reached OBEN threshold) - 5s cooldown started");
                     }
+                    // WiFi-Sleep-Mode: Hysterese zurücksetzen, wenn Tank voll wird
+                    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                    sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                    xSemaphoreGive(sys_state_mutex);
                     break;
                     
                 case 3:  // Tank EMPTY
+                    // WiFi-Sleep-Mode: Aufwecken, wenn Tank nicht mehr voll ist
+                    if (state_snapshot.wifi_sleep_active) {
+                        ESP_LOGI(TAG, "🌅 WiFi-Sleep-Mode: Aufwecken (Tank nicht mehr voll)");
+                        esp_wifi_start();
+                        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                        sys_state.wifi_sleep_active = false;
+                        sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                        xSemaphoreGive(sys_state_mutex);
+                    }
                     break;
             }
             last_tank_state = current_tank_state;
@@ -3559,9 +3822,12 @@ static void valve_task(void *pvParameters)
         }
         
         // LED feedback: ON while opening, OFF when closed
+        // Langsames Blinken bei WiFi-Sleep-Mode oder Notaus
         get_system_state_snapshot(&state_snapshot);
-        if (state_snapshot.emergency_stop_active) {
-            gpio_set_level(GPIO_LED_STATUS, 1);  // Red alert
+        if (state_snapshot.emergency_stop_active || state_snapshot.wifi_sleep_active) {
+            // Langsames Blinken (1 Sekunde an, 1 Sekunde aus)
+            uint64_t blink_cycle = (now_ms / 1000) % 2;
+            gpio_set_level(GPIO_LED_STATUS, blink_cycle ? 1 : 0);
         } else {
             gpio_set_level(GPIO_LED_STATUS, state_snapshot.valve_state ? 1 : 0);
         }
@@ -3610,11 +3876,40 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 // ============================================================================
 
 /**
+ * @brief Prüft, ob die aktuelle Uhrzeit im WiFi-Sleep-Zeitfenster liegt
+ */
+static bool is_in_wifi_sleep_window(void)
+{
+    system_state_t state_snapshot;
+    get_system_state_snapshot(&state_snapshot);
+
+    // Aktuelle Uhrzeit holen
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    int current_hour = timeinfo.tm_hour;
+
+    uint32_t start_hour = state_snapshot.wifi_sleep_start_hour;
+    uint32_t end_hour = state_snapshot.wifi_sleep_end_hour;
+
+    // Zeitfenster prüfen (z.B. 19:00-05:00)
+    if (start_hour < end_hour) {
+        // Normaler Zeitfenster (z.B. 08:00-18:00)
+        return (current_hour >= start_hour && current_hour < end_hour);
+    } else {
+        // Zeitfenster über Mitternacht (z.B. 19:00-05:00)
+        return (current_hour >= start_hour || current_hour < end_hour);
+    }
+}
+
+/**
  * @brief Task: WiFi Connection Management with Retry Logic
- * 
+ *
  * Handles WiFi state transitions:
  * - STA mode: 3 connection attempts à 3 seconds
  * - Fallback: AP mode if all retries fail
+ * - WiFi-Sleep-Mode: Deaktiviert WiFi im konfigurierten Zeitfenster
  */
 static void wifi_task(void *pvParameters)
 {
@@ -3630,6 +3925,46 @@ static void wifi_task(void *pvParameters)
             if (wifi_snapshot.ap_active) {
                 set_fallback_ap_enabled(false);
             }
+
+            // WiFi-Sleep-Mode Prüfung
+            if (is_in_wifi_sleep_window()) {
+                system_state_t state_snapshot;
+                get_system_state_snapshot(&state_snapshot);
+
+                // WiFi deaktivieren, wenn Tank voll und Ventil geschlossen
+                if (state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top && !state_snapshot.valve_state) {
+                    // Hysterese-Prüfung: Tank muss 5 Minuten voll sein
+                    if (state_snapshot.wifi_sleep_hysteresis_start_ms == 0) {
+                        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                        sys_state.wifi_sleep_hysteresis_start_ms = now;
+                        xSemaphoreGive(sys_state_mutex);
+                    } else if (now - state_snapshot.wifi_sleep_hysteresis_start_ms >= WIFI_SLEEP_HYSTERESIS_MS) {
+                        // Hysterese erreicht - WiFi deaktivieren
+                        ESP_LOGI(TAG, "💤 WiFi-Sleep-Mode: Deaktiviere WiFi (Tank voll, Ventil geschlossen)");
+                        esp_wifi_stop();
+                        xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                        sys_state.wifi_sleep_active = true;
+                        sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                        xSemaphoreGive(sys_state_mutex);
+                    }
+                } else {
+                    // Hysterese zurücksetzen
+                    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                    sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                    xSemaphoreGive(sys_state_mutex);
+                }
+            } else {
+                // Außerhalb des Zeitfensters: WiFi aktivieren
+                if (sys_state.wifi_sleep_active) {
+                    ESP_LOGI(TAG, "🌅 WiFi-Sleep-Mode: Aktiviere WiFi (außerhalb Zeitfenster)");
+                    esp_wifi_start();
+                    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                    sys_state.wifi_sleep_active = false;
+                    sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                    xSemaphoreGive(sys_state_mutex);
+                }
+            }
+
             vTaskDelay(pdMS_TO_TICKS(5000));  // Check every 5 seconds
             continue;
         }

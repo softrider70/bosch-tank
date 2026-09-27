@@ -58,6 +58,7 @@
 #define TOUCH_KEY_THRESHOLD_PERCENT     70      // Touch erkannt unter 70% der Basislinie (empfindlicher)
 #define TOUCH_KEY_DEBOUNCE_COUNT        3       // Touch muss 3 Samples stabil sein (stabilere Erkennung)
 #define TOUCH_KEY_RELEASE_COUNT         3       // Release muss 3 Samples stabil sein (stabilere Release-Erkennung)
+#define TOUCH_KEY_DOUBLE_PRESS_MS       500     // Timeout fuer Double-Press Erkennung (500ms)
 
 // ============================================================================
 // Valve Control Configuration (Solenoid, via MOSFET)
@@ -113,6 +114,8 @@
 #define NVS_KEY_EMERGENCY_STOP          "emerg_stop"
 #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
 #define NVS_KEY_ERROR_LOG               "error_log"
+#define NVS_KEY_WIFI_SLEEP_START_HOUR   "wifi_sleep_start"  // WiFi-Sleep Start-Stunde (0-23)
+#define NVS_KEY_WIFI_SLEEP_END_HOUR     "wifi_sleep_end"    // WiFi-Sleep End-Stunde (0-23)
 
 // NVS String-Längen
 #define NVS_SSID_MAX_LEN                32
@@ -133,6 +136,11 @@
 // WiFi-Verbindungs-Timeout
 #define WIFI_CONNECT_TIMEOUT_MS         10000   // 10 Sekunden
 #define WIFI_RETRY_MAX                  3
+
+// WiFi-Sleep-Mode (Stromsparfunktion)
+#define WIFI_SLEEP_START_HOUR_DEFAULT   19      // Default: 19:00 Uhr
+#define WIFI_SLEEP_END_HOUR_DEFAULT     5       // Default: 05:00 Uhr
+#define WIFI_SLEEP_HYSTERESIS_MS        300000  // 5 Minuten Hysterese gegen Flackern
 
 // === AP-Mode IP Configuration ===
 // Landing-Page wird unter 10.1.1.1 erreichbar sein
