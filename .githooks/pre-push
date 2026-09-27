@@ -1,0 +1,19 @@
+#!/bin/sh
+# Pre-Push-Sicherheitspruefung.
+# WICHTIG: Git fuer Windows fuehrt Hooks mit der mitgelieferten sh aus -
+# eine reine Batch-Datei ohne Shebang laesst sich hier nicht starten
+# ("cannot spawn .githooks/pre-push"). Deshalb dieses sh-Skript, das die
+# eigentliche Pruefung (PowerShell) aufruft und den Exit-Code weitergibt.
+
+SCRIPT_DIR=$(dirname "$0")
+CHECK_SCRIPT="$SCRIPT_DIR/../tools/pre-push-security-check.ps1"
+
+if [ -f "$CHECK_SCRIPT" ]; then
+    powershell -NoProfile -ExecutionPolicy Bypass -File "$CHECK_SCRIPT"
+    if [ $? -ne 0 ]; then
+        echo "Push abgebrochen - Sicherheitspruefung fehlgeschlagen!"
+        exit 1
+    fi
+else
+    echo "Warnung: Sicherheits-Skript nicht gefunden: $CHECK_SCRIPT"
+fi
