@@ -159,6 +159,25 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
     - Fill-Progress-Timeout
     - Durchfluss in L/min
 
+### Zugangsschutz (Benutzer und Passwort)
+
+Die Web-Oberflaeche und alle API-Aufrufe sind mit einem Passwort geschuetzt
+(HTTP Basic Auth). Der Browser fragt von selbst danach - ein Login-Formular
+gibt es nicht, der Benutzername ist beliebig.
+
+- Das Passwort steht im **seriellen Startprotokoll**:
+  `🔑 Weboberflaeche: Benutzer beliebig, Passwort: 5vmgymws`
+- Es wird beim ersten Start erzeugt (8 Zeichen, ohne verwechselbare Zeichen)
+  und im NVS gespeichert. Es bleibt also ueber Neustarts und Updates gleich.
+- Vergessen? NVS loeschen (`idf.py -p COMx erase-flash`, danach neu flashen) -
+  dann wird ein neues Passwort erzeugt und wieder im Log ausgegeben.
+- Fuer Skripte: Passwort in die Umgebungsvariable `BOSCH_TANK_PASS` legen.
+  `ota.ps1`, `ota_upload.ps1` und `tools/flash-mode.ps1` nutzen sie automatisch.
+- Kurzzeitig abschalten: in `include/config.h` `API_AUTH_ENABLED` auf `0`
+  setzen und neu flashen. Nur fuer Fehlersuche gedacht.
+- Die Seite `/generate_204` (Erkennung des Anmelde-Portals im AP-Modus) bleibt
+  bewusst ohne Passwort, sonst meckern Handy und Windows beim Verbinden.
+
 ## Chat-Anforderungen
 
 Siehe `PROJECT.md` Abschnitt `chat_requirements` fuer die vollstaendige Liste.

@@ -51,6 +51,7 @@
 // Network utilities
 // #include "mdns.h"  // TODO: Add mdns to CMakeLists.txt REQUIRES
 #include "esp_sntp.h"   // Zeitquelle fuer den WiFi-Schlafmodus (Komponente: lwip)
+#include "mbedtls/base64.h"   // fuer die Basic-Auth-Pruefung der Weboberflaeche
 
 // Project Config
 #include "config.h"
@@ -175,6 +176,22 @@ static uint16_t touch_last_value = 0;
 static uint16_t touch_min_value = 0;   // niedrigster Wert seit dem Start (Diagnose)
 static uint8_t touch_dip_run = 0;      // laufende Messungen unter der Schwelle
 static uint8_t touch_max_dip = 0;      // laengste Absenkung seit dem Start (Diagnose)
+
+// Passwort fuer die Weboberflaeche (HTTP Basic Auth). Wird beim ersten Start
+// erzeugt, im NVS abgelegt und bei jedem Start im seriellen Log ausgegeben.
+static char api_password[API_PASSWORD_LEN + 1] = {0};
+
+/**
+ * @brief Erzeugt ein zufaelliges Passwort (ohne i, l, o, 0, 1 - verwechselbar).
+ */
+static void generate_api_password(void)
+{
+    static const char alphabet[] = "abcdefghjkmnpqrstuvwxyz23456789";
+    for (int i = 0; i < API_PASSWORD_LEN; i++) {
+        api_password[i] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+    }
+    api_password[API_PASSWORD_LEN] = '\0';
+}
 
 // WiFi State Variables
 typedef struct {
@@ -389,10 +406,20 @@ static esp_err_t init_nvs(void)
         }
     }
     
+    // Passwort fuer die Weboberflaeche laden oder einmalig erzeugen
+    size_t api_pass_len = sizeof(api_password);
+    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password, &api_pass_len) != ESP_OK ||
+        api_password[0] == '\0') {
+        generate_api_password();
+        nvs_set_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password);
+        nvs_commit(sys_state.nvs_handle);
+        ESP_LOGW(TAG, "🔑 Neues Passwort fuer die Weboberflaeche erzeugt");
+    }
+    ESP_LOGW(TAG, "🔑 Weboberflaeche: Benutzer beliebig, Passwort: %s", api_password);
+
     ESP_LOGI(TAG, "NVS initialized successfully");
     return ESP_OK;
 }
-
 // ============================================================================
 // Phase 1: I2C Initialization (for VL6150X/VL6180X TOF sensor)
 // ============================================================================
@@ -1459,10 +1486,61 @@ static void finalize_active_valve_session(uint64_t now_ms)
 }
 
 /**
+ * @brief Prueft den Authorization-Header (HTTP Basic).
+ *
+ * Der Benutzername ist beliebig, nur das Passwort zaehlt.
+ */
+static bool api_authorized(httpd_req_t *req)
+{
+#if !API_AUTH_ENABLED
+    return true;
+#else
+    char header[96] = {0};
+    size_t len = httpd_req_get_hdr_value_len(req, "Authorization");
+    if (len == 0 || len >= sizeof(header)) {
+        return false;
+    }
+    if (httpd_req_get_hdr_value_str(req, "Authorization", header, sizeof(header)) != ESP_OK) {
+        return false;
+    }
+    if (strncmp(header, "Basic ", 6) != 0) {
+        return false;
+    }
+
+    unsigned char decoded[80] = {0};
+    size_t decoded_len = 0;
+    if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len,
+                              (const unsigned char *)(header + 6),
+                              strlen(header + 6)) != 0) {
+        return false;
+    }
+    decoded[decoded_len] = '\0';
+
+    const char *colon = strchr((const char *)decoded, ':');
+    const char *given = (colon != NULL) ? (colon + 1) : (const char *)decoded;
+    return (api_password[0] != '\0') && (strcmp(given, api_password) == 0);
+#endif
+}
+
+/**
+ * @brief Antwortet mit 401, wenn die Zugangsdaten fehlen oder falsch sind.
+ */
+static esp_err_t api_require_auth(httpd_req_t *req)
+{
+    if (api_authorized(req)) {
+        return ESP_OK;
+    }
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"" API_AUTH_REALM "\"");
+    httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Login erforderlich");
+    return ESP_FAIL;
+}
+
+/**
  * @brief Handler: GET /api/status - Return system status as JSON
  */
 static esp_err_t status_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char json_response[2600];
     char escaped_emergency_reason[(sizeof(sys_state.emergency_stop_reason) * 2) + 1] = {0};
     char escaped_stack_warning_message[(sizeof(sys_state.stack_warning_message) * 2) + 1] = {0};
@@ -1616,6 +1694,7 @@ static esp_err_t status_handler(httpd_req_t *req)
  */
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char json_response[512];
     system_state_t state_snapshot;
     
@@ -1655,6 +1734,7 @@ static esp_err_t config_get_handler(httpd_req_t *req)
  */
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char buf[512] = {0};
     esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
 
@@ -1726,6 +1806,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
  */
 static esp_err_t valve_manual_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char buf[128] = {0};
     esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
 
@@ -1771,6 +1852,7 @@ static esp_err_t valve_manual_handler(httpd_req_t *req)
  */
 static esp_err_t emergency_stop_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char buf[64] = {0};
     esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
     system_state_t state_snapshot;
@@ -1830,6 +1912,7 @@ static esp_err_t emergency_stop_handler(httpd_req_t *req)
  */
 static esp_err_t valve_stop_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
     sys_state.user_fill_halt = true;
     xSemaphoreGive(sys_state_mutex);
@@ -1850,6 +1933,7 @@ static esp_err_t valve_stop_handler(httpd_req_t *req)
  */
 static esp_err_t counters_reset_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     system_state_t state_snapshot;
     get_system_state_snapshot(&state_snapshot);
 
@@ -1870,6 +1954,7 @@ static esp_err_t counters_reset_handler(httpd_req_t *req)
  */
 static esp_err_t warnings_reset_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     bool cleared = clear_runtime_warnings();
 
     send_json_response(req,
@@ -1884,6 +1969,7 @@ static esp_err_t warnings_reset_handler(httpd_req_t *req)
  */
 static esp_err_t ota_status_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     ota_state_t snapshot;
     char escaped_phase[(sizeof(snapshot.phase) * 2) + 1] = {0};
     char escaped_message[(sizeof(snapshot.message) * 2) + 1] = {0};
@@ -1931,6 +2017,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
  */
 static esp_err_t ota_rollback_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
     
     if (err == ESP_OK) {
@@ -1953,6 +2040,7 @@ static esp_err_t ota_rollback_handler(httpd_req_t *req)
  */
 static esp_err_t ota_start_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char body[320] = {0};
     char url[192] = {0};
     ota_state_t snapshot;
@@ -2039,6 +2127,7 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
  */
 static esp_err_t system_reset_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Reset waehrend OTA verhindern
     ota_state_t ota_snapshot;
     get_ota_state_snapshot(&ota_snapshot);
@@ -2271,6 +2360,7 @@ static void ota_health_check_task(void *pvParameters)
  */
 static esp_err_t wifi_status_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Get current WiFi mode and status
     wifi_ap_record_t ap_info;
     char response[512];
@@ -2321,6 +2411,7 @@ static esp_err_t wifi_status_handler(httpd_req_t *req)
  */
 static esp_err_t wifi_config_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Read content length
     size_t content_len = req->content_len;
     if (content_len > 1024) {
@@ -2531,6 +2622,7 @@ static void dns_server_task(void *pvParameters)
  */
 static esp_err_t index_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Lightweight HTML UI - no emojis, minimal size for reliable transfer
     static const char index_html[] = R"html(<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

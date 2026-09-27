@@ -10,7 +10,8 @@ param(
     [string]$HostIp = "",
     [int]$HttpPort = 8070,
     [int]$StatusTimeoutSec = 240,
-    [int]$Baud = 921600
+    [int]$Baud = 921600,
+    [string]$DevicePass = $env:BOSCH_TANK_PASS
 )
 
 $ErrorActionPreference = "Stop"
@@ -341,6 +342,11 @@ if ($Mode -eq 'ota') {
         }
     }
 
+    if (-not $DevicePass) {
+        throw "Kein Geraetepasswort. Bitte -DevicePass <Passwort> angeben oder `$env:BOSCH_TANK_PASS setzen (steht im seriellen Startprotokoll)."
+    }
+    $authHeaders = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("admin:$DevicePass")) }
+
     $serverProc = $null
     try {
         $serverProc = Start-Process -FilePath "python" -ArgumentList "-m", "http.server", "$HttpPort", "--bind", "$HostIp" -WorkingDirectory (Join-Path $repoRoot "build") -PassThru -WindowStyle Hidden
@@ -354,13 +360,13 @@ if ($Mode -eq 'ota') {
         Write-Host "[OTA] Start: $startUri"
         Write-Host "[OTA] URL:   $otaUrl"
 
-        $startResp = Invoke-RestMethod -Method Post -Uri $startUri -ContentType "application/json" -Body $payload -TimeoutSec 15
+        $startResp = Invoke-RestMethod -Method Post -Uri $startUri -ContentType "application/json" -Body $payload -TimeoutSec 15 -Headers $authHeaders
         Write-Host ("[OTA] Antwort: {0}" -f ($startResp | ConvertTo-Json -Compress))
 
         $deadline = (Get-Date).AddSeconds($StatusTimeoutSec)
         do {
             try {
-                $statusResp = Invoke-RestMethod -Method Get -Uri $statusUri -TimeoutSec 8
+                $statusResp = Invoke-RestMethod -Method Get -Uri $statusUri -TimeoutSec 8 -Headers $authHeaders
                 $inProgress = [bool]$statusResp.ota.in_progress
                 $phase = [string]$statusResp.ota.phase
                 $msg = [string]$statusResp.ota.message
