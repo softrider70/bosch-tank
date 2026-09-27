@@ -471,6 +471,14 @@ static esp_err_t init_i2c(void)
 // ============================================================================
 
 /**
+ * @brief Status-LED schalten. Polaritaet steht in config.h (LED an = Ventil offen).
+ */
+static void set_status_led(bool on)
+{
+    gpio_set_level(GPIO_LED_STATUS, on ? LED_ON_LEVEL : LED_OFF_LEVEL);
+}
+
+/**
  * @brief Initialize GPIO pins for valve and LED control
  */
 static esp_err_t init_gpio(void)
@@ -509,7 +517,7 @@ static esp_err_t init_gpio(void)
     
     // Brownout protection: Close valve immediately
     gpio_set_level(GPIO_VALVE_CONTROL, 0);  // LOW = closed
-    gpio_set_level(GPIO_LED_STATUS, 1);     // HIGH = LED on (status: init)
+    set_status_led(true);                   // LED an waehrend der Initialisierung
     
     ESP_LOGI(TAG, "GPIO initialized - Valve on GPIO %d, LED on GPIO %d", 
              GPIO_VALVE_CONTROL, GPIO_LED_STATUS);
@@ -3941,9 +3949,10 @@ static void valve_task(void *pvParameters)
         if (state_snapshot.emergency_stop_active || state_snapshot.wifi_sleep_active) {
             // Langsames Blinken (1 Sekunde an, 1 Sekunde aus)
             uint64_t blink_cycle = (now_ms / 1000) % 2;
-            gpio_set_level(GPIO_LED_STATUS, blink_cycle ? 1 : 0);
+            set_status_led(blink_cycle != 0);
         } else {
-            gpio_set_level(GPIO_LED_STATUS, state_snapshot.valve_state ? 1 : 0);
+            // Kopplung: LED an, solange das Ventil offen ist
+            set_status_led(state_snapshot.valve_state);
         }
         
         vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
@@ -4643,9 +4652,8 @@ void app_main(void)
     ESP_LOGI(TAG, "   - OBEN (Tank FULL):  %d cm ← Valve closes when reached", sys_state.threshold_top);
     ESP_LOGI(TAG, "   - UNTEN (Tank EMPTY): %d cm ← Valve opens when reached", sys_state.threshold_bottom);
     ESP_LOGI(TAG, "   - Timeout (max fill): %d ms ← Safety cutoff after this duration", sys_state.timeout_max);
-    
-    // LED indicates system ready
-    gpio_set_level(GPIO_LED_STATUS, 0);  // LED off (ready)
+    // LED zeigt den Ventilzustand (aus, solange das Ventil geschlossen ist)
+    set_status_led(false);
     
     ESP_LOGI(TAG, "🎯 System ready - waiting for sensor data...");
 }

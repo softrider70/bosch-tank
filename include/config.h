@@ -16,6 +16,11 @@
 // ============================================================================
 
 #define GPIO_LED_STATUS     2       // Onboard LED (Status-Anzeige)
+// Polaritaet der Onboard-LED: am Modul LOW-aktiv (0 = an, 1 = aus).
+// Beobachtet am 2026-09-27: die LED leuchtete dauerhaft, obwohl die Firmware
+// mit aktiver Logik 0 ("aus") geschrieben hat.
+#define LED_ON_LEVEL        0
+#define LED_OFF_LEVEL       1
 #define GPIO_I2C_SDA        21      // ToF-Sensor SDA (Data)
 #define GPIO_I2C_SCL        22      // ToF-Sensor SCL (Clock)
 #define GPIO_VALVE_CONTROL  32      // GPIO für externen Transistor zur Ventilsteuerung
