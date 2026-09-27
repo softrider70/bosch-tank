@@ -24,7 +24,7 @@ Dieses Projekt wurde aus `delonghi-tank` abgeleitet. Beide Projekte teilen die G
 - Sensor-Begrenzung auf 18cm (Werte darueber als 25cm angezeigt)
 - UNTEN-Bestätigung (7 aufeinanderfolgende Messungen gegen Sensorrauschen)
 - Sonderbehandlung manuelle Fuellung bei 25cm mit 15s-Timeout
-- LED-Indikator fuer WiFi-Sleep und Notaus
+- Status-LED fuer Ventil/Notaus (am verbauten Modul nicht schaltbar, siehe Abschnitt LED)
 
 ### Tooling-Unterschiede
 
@@ -120,7 +120,10 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
   - Automatisch: Wenn Wasserstand unter OBEN sinkt
   - Manuell: Touch-Key (Dreifach-Press)
 - Außerhalb des Zeitfensters (05:00-19:00) ist WiFi immer aktiv
-- **LED-Indikator:** Status-LED blinkt langsam bei WiFi-Sleep-Mode und bei Notaus
+- **Status-LED:** LED an = Ventil offen, langsames Blinken bei WiFi-Sleep-Mode oder Notaus.
+  Wichtig: Am verbauten Modul treibt **GPIO 2 keine LED** (die rote LED ist die Betriebsanzeige,
+  am 2026-09-27 per Blinktest geprueft). Mit einer externen LED an GPIO 2 (Vorwiderstand 330 Ohm
+  nach GND) funktioniert die Anzeige ohne Codeaenderung.
 - Konfiguration über Web-UI (Start/Endzeit)
 - Validierung: 0-23, Start != End
 
