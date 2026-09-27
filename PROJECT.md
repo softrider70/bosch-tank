@@ -120,7 +120,11 @@ api:
     - POST /api/sensor/reset
     - POST /api/ota/start
     - GET /api/ota/status
+    - POST /api/ota/rollback
     - POST /api/system/reset
+    - GET /api/telegram
+    - POST /api/telegram
+    - POST /api/telegram/test
 
 config_runtime:
   threshold_top_cm: configurable

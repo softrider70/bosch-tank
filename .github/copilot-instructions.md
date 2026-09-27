@@ -33,4 +33,8 @@ zufaelliges Passwort erzeugt und im NVS (`api_pass`) gespeichert. Aktives
 Passwort steht im seriellen Startprotokoll
 (`🔑 Weboberflaeche: ... Passwort: ...`). Skripte nutzen `$env:BOSCH_TANK_PASS`.
 
+Notaus-Meldungen gehen per Telegram raus (`components/main/telegram.c`,
+Vorbild katzenbrunnen). Token und Chat-ID liegen im NVS (`tg_token`,
+`tg_chat`) und werden in den Einstellungen der Weboberflaeche gesetzt.
+
 Schwesterprojekt: `../delonghi-tank` (gleiche Grundarchitektur, andere Hardware).

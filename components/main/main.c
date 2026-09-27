@@ -52,6 +52,7 @@
 // #include "mdns.h"  // TODO: Add mdns to CMakeLists.txt REQUIRES
 #include "esp_sntp.h"   // Zeitquelle fuer den WiFi-Schlafmodus (Komponente: lwip)
 #include "mbedtls/base64.h"   // fuer die Basic-Auth-Pruefung der Weboberflaeche
+#include "telegram.h"   // Telegram-Benachrichtigungen (Notaus)
 
 // Project Config
 #include "config.h"
@@ -1462,11 +1463,20 @@ static void trigger_emergency_stop(const char *reason)
     sys_state.manual_fill_active = false;
     xSemaphoreGive(sys_state_mutex);
     ESP_LOGW(TAG, "🚨 NOTAUS - Ventil geschlossen (%s)", reason != NULL ? reason : "ohne Angabe");
+
+    // Telegram nur beim Uebergang in den Notaus melden, nicht bei Wiederholungen
+    if (!was_active) {
+        char tg_msg[160];
+        snprintf(tg_msg, sizeof(tg_msg), "🚨 bosch-tank: NOTAUS - %s",
+                 reason != NULL ? reason : "ohne Angabe");
+        telegram_notify(tg_msg);
+    }
 }
 
 static void reset_emergency_stop(void)
 {
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    bool was_active = sys_state.emergency_stop_active;
     sys_state.emergency_stop_active = false;
     // Grund absichtlich stehen lassen: er bleibt als "letzter Notaus-Grund" in
     // der Oberflaeche sichtbar. Sonst ist nach dem Zuruecksetzen nicht mehr
@@ -1474,6 +1484,10 @@ static void reset_emergency_stop(void)
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 0);
     nvs_commit(sys_state.nvs_handle);
     xSemaphoreGive(sys_state_mutex);
+
+    if (was_active) {
+        telegram_notify("✅ bosch-tank: Notaus aufgehoben");
+    }
 }
 
 static void finalize_active_valve_session(uint64_t now_ms)
@@ -2514,6 +2528,86 @@ static esp_err_t wifi_config_handler(httpd_req_t *req)
 }
 
 /**
+ * @brief Handler: GET /api/telegram - Status der Telegram-Einrichtung
+ */
+static esp_err_t telegram_status_handler(httpd_req_t *req)
+{
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
+
+    char chat_id[TG_CHAT_MAX_LEN] = {0};
+    telegram_get_chat_id(chat_id, sizeof(chat_id));
+
+    // Der Token wird nie ausgegeben, nur ob einer gespeichert ist.
+    char json[192];
+    snprintf(json, sizeof(json),
+             "{\"configured\":%s,\"chat_id\":\"%s\",\"token_set\":%s}",
+             telegram_is_configured() ? "true" : "false",
+             chat_id,
+             telegram_has_token() ? "true" : "false");
+    send_json_response(req, json);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler: POST /api/telegram - Token und/oder Chat-ID speichern
+ */
+static esp_err_t telegram_save_handler(httpd_req_t *req)
+{
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
+
+    char buf[256];
+    int recv_len = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (recv_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Leerer Body");
+        return ESP_FAIL;
+    }
+    buf[recv_len] = '\0';
+
+    char token[TG_TOKEN_MAX_LEN] = {0};
+    char chat_id[TG_CHAT_MAX_LEN] = {0};
+    bool got_token = parse_json_string_field(buf, "token", token, sizeof(token));
+    bool got_chat = parse_json_string_field(buf, "chat_id", chat_id, sizeof(chat_id));
+
+    // Leere Felder bedeuten: Wert unveraendert lassen.
+    if ((!got_token || token[0] == '\0') && (!got_chat || chat_id[0] == '\0')) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Token oder Chat-ID angeben");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = telegram_save_config((got_token && token[0] != '\0') ? token : NULL,
+                                         (got_chat && chat_id[0] != '\0') ? chat_id : NULL);
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Speichern fehlgeschlagen");
+        return ESP_FAIL;
+    }
+
+    send_json_response(req, "{\"status\":\"OK\"}");
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler: POST /api/telegram/test - Testnachricht senden
+ */
+static esp_err_t telegram_test_handler(httpd_req_t *req)
+{
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
+
+    if (!telegram_is_configured()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Nicht eingerichtet");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = telegram_send_now("🔔 bosch-tank: Testnachricht - Benachrichtigung funktioniert.");
+    if (ret != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Senden fehlgeschlagen (siehe Log)");
+        return ESP_FAIL;
+    }
+
+    send_json_response(req, "{\"status\":\"OK\"}");
+    return ESP_OK;
+}
+
+/**
  * @brief Captive portal: redirect to root page (302)
  */
 static esp_err_t captive_redirect_handler(httpd_req_t *req)
@@ -2762,6 +2856,18 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <button class="btn-success" id="save-btn" onclick="saveSettings()">Speichern</button>
 </div>
 <div id="msg-settings" class="msg" style="display:none"></div>
+<div style="margin-top:20px;padding-top:15px;border-top:1px solid #ddd">
+<p style="font-size:12px;margin:0 0 10px 0"><b>Telegram (Notaus-Meldungen):</b></p>
+<label for="tg-chat">Chat-ID:</label>
+<input type="text" id="tg-chat" placeholder="z.B. 123456789">
+<label for="tg-token">Bot-Token:</label>
+<input type="password" id="tg-token" placeholder="leer = unveraendert">
+<div class="buttons">
+<button class="btn-success" onclick="saveTelegram()">Telegram speichern</button>
+<button class="btn-secondary" onclick="testTelegram()">Testnachricht</button>
+</div>
+<div class="status-row"><span>Status:</span><span id="tg-state">-</span></div>
+</div>
 </div>
 
 <!-- WiFi TAB -->
@@ -3172,7 +3278,7 @@ function switchTab(evt, t){
   document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
   document.getElementById(t).classList.add('active');
     if(evt && evt.target) evt.target.classList.add('active');
-  if(t==='settings') loadSettings();
+  if(t==='settings'){loadSettings(); loadTelegram();}
   if(t==='wifi') loadWiFi();
   if(t==='diagnostics'){
       setDefaultOtaUrl();
@@ -3320,6 +3426,9 @@ function saveSettings(){const top = parseInt(document.getElementById('top').valu
 function loadWiFi(){fetch('/api/wifi/status').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {const c=d.wifi&&d.wifi.connected; document.getElementById('wifi-con').textContent=c?'Verbunden':'Getrennt'; document.getElementById('wifi-con').style.color=c?'#4caf50':'#f44336'; document.getElementById('wifi-ssid').textContent = (d.wifi && d.wifi.ssid) ? d.wifi.ssid : '-'; document.getElementById('wifi-rssi').textContent = (d.wifi && d.wifi.rssi) ? (d.wifi.rssi + ' dBm') : '-'; document.getElementById('wifi-ip').textContent = (d.wifi && d.wifi.ip) ? d.wifi.ip : '-';}).catch(e => {console.error('loadWiFi failed:', e); document.getElementById('wifi-con').textContent='Fehler'; showMsg('wifi', 'WiFi API Fehler', true);});}
 function connectWiFi(){const s = document.getElementById('new-ssid').value; const p = document.getElementById('new-pass').value; if(!s||!p) {showMsg('wifi', 'SSID und Pass erforderlich', true); return;} fetch('/api/wifi/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ssid: s, password: p})}).then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {showMsg('wifi', 'WiFi Update gesendet', false); document.getElementById('new-ssid').value = ''; document.getElementById('new-pass').value = ''; setTimeout(loadWiFi, 2000);}).catch(e => {console.error('connectWiFi failed:', e); showMsg('wifi', 'Fehler: '+e.message, true);});}
 function reset(){if(confirm('System wirklich neustarten?')) fetch('/api/system/reset', {method: 'POST'}).then(() => showMsg('wifi', 'Neustart...', false)).catch(e => showMsg('wifi', 'Fehler', true));}
+function loadTelegram(){fetch('/api/telegram').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {document.getElementById('tg-chat').value = d.chat_id || ''; const ok = !!d.configured; document.getElementById('tg-state').textContent = ok ? 'eingerichtet' : (d.token_set ? 'Chat-ID fehlt' : 'nicht eingerichtet'); document.getElementById('tg-state').style.color = ok ? '#4caf50' : '#f44336';}).catch(e => {console.error('loadTelegram failed:', e);});}
+function saveTelegram(){const t = document.getElementById('tg-token').value.trim(); const c = document.getElementById('tg-chat').value.trim(); if(!t && !c){showMsg('settings', 'Nichts zu speichern: Token oder Chat-ID eingeben', true); return;} fetch('/api/telegram', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: t, chat_id: c})}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status)); return r.json();}).then(() => {document.getElementById('tg-token').value = ''; showMsg('settings', 'Telegram gespeichert', false); loadTelegram();}).catch(e => {console.error('saveTelegram failed:', e); showMsg('settings', 'Telegram: '+e.message, true);});}
+function testTelegram(){fetch('/api/telegram/test', {method: 'POST'}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status)); return r.json();}).then(() => showMsg('settings', 'Testnachricht gesendet', false)).catch(e => {console.error('testTelegram failed:', e); showMsg('settings', 'Test: '+e.message, true);});}
 syncFillButton();
 syncValveIndicator(false);
 syncSaveButton();
@@ -4381,7 +4490,7 @@ static httpd_handle_t start_webserver(void)
     config.stack_size = TASK_STACK_SERVER;
     config.task_priority = TASK_PRIO_SERVER;
     config.max_open_sockets = MAX_OPEN_SOCKETS;
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 32;   // 15 API + 3 Telegram + 9 Captive + Reserve
     config.core_id = TASK_CORE_NETWORK;
     
     httpd_handle_t server = NULL;
@@ -4519,6 +4628,31 @@ static httpd_handle_t start_webserver(void)
         };
         httpd_register_uri_handler(server, &reset_uri);
         
+        // Register GET/POST /api/telegram + POST /api/telegram/test
+        httpd_uri_t tg_status_uri = {
+            .uri = "/api/telegram",
+            .method = HTTP_GET,
+            .handler = telegram_status_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &tg_status_uri);
+
+        httpd_uri_t tg_save_uri = {
+            .uri = "/api/telegram",
+            .method = HTTP_POST,
+            .handler = telegram_save_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &tg_save_uri);
+
+        httpd_uri_t tg_test_uri = {
+            .uri = "/api/telegram/test",
+            .method = HTTP_POST,
+            .handler = telegram_test_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &tg_test_uri);
+        
         // Captive portal detection endpoints (Apple, Android, Windows, Firefox)
         const char *captive_uris[] = {
             "/hotspot-detect.html",
@@ -4608,6 +4742,10 @@ void app_main(void)
     }
     // ota_state_mutex bereits am Anfang von app_main initialisiert
     ESP_LOGI(TAG, "   ✓ sys_state mutex created");
+
+    // Telegram-Benachrichtigungen vorbereiten (Token/Chat-ID kommen aus dem NVS)
+    telegram_init();
+    telegram_start();
     
     // Load OTA last_result_ok from NVS for health-check after reboot
     {

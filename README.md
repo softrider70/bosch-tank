@@ -178,6 +178,20 @@ gibt es nicht, der Benutzername ist beliebig.
 - Die Seite `/generate_204` (Erkennung des Anmelde-Portals im AP-Modus) bleibt
   bewusst ohne Passwort, sonst meckern Handy und Windows beim Verbinden.
 
+### Telegram-Benachrichtigung (Notaus)
+
+Bei jedem Notaus und beim Aufheben schickt das Geraet eine Nachricht ueber
+Telegram (gleiche Technik wie im Schwesterprojekt katzenbrunnen). Einrichten
+in der Weboberflaeche unter Einstellungen:
+
+- **Bot-Token**: vom Bot-Vater (BotFather) - bleibt im NVS und wird nie angezeigt
+- **Chat-ID**: Zielchat (z.B. `123456789` oder `@kanalname`)
+- **Testnachricht** verschickt sofort eine Probenachricht
+
+Ohne Token und Chat-ID passiert nichts, es wird nur ins Log geschrieben.
+Meldungen im Chat: `🚨 bosch-tank: NOTAUS - <Grund>` und
+`✅ bosch-tank: Notaus aufgehoben`.
+
 ## Chat-Anforderungen
 
 Siehe `PROJECT.md` Abschnitt `chat_requirements` fuer die vollstaendige Liste.
