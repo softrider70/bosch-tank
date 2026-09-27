@@ -108,12 +108,12 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
 
 ### WiFi-Sleep-Mode (Stromsparfunktion)
 
-**Zurzeit abgeschaltet** (Wunsch 2026-09-27, er sprang zu frueh an):
-`WIFI_SLEEP_ENABLED` in `include/config.h` steht auf `0` - die Funktion ist
-damit aus, das Zeitfenster hat keine Wirkung. Zum Reaktivieren auf `1` setzen
-und neu flashen.
+Stand 2026-09-27 abends: **wieder aktiv**, Fenster nun **21:00-05:00**
+(vorher 19:00 - er sprang dem Nutzer zu frueh an). `WIFI_SLEEP_ENABLED` in
+`include/config.h` schaltet die Funktion (1 = an, 0 = aus); die Zeiten stehen
+im NVS und in den Einstellungen der Weboberflaeche.
 
-- **Zeitgesteuerte WiFi-Deaktivierung** mit konfigurierbarem Zeitfenster (Default: 19:00-05:00)
+- **Zeitgesteuerte WiFi-Deaktivierung** mit konfigurierbarem Zeitfenster (Default: 21:00-05:00)
 - WiFi wird im Sleep-Zeitfenster deaktiviert, wenn:
   - Wasserstand >= OBEN (Tank voll)
   - Ventil geschlossen
