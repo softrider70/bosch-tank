@@ -173,6 +173,8 @@ static uint32_t touch_press_count = 0;
 static uint8_t touch_last_presses = 0;
 static uint16_t touch_last_value = 0;
 static uint16_t touch_min_value = 0;   // niedrigster Wert seit dem Start (Diagnose)
+static uint8_t touch_dip_run = 0;      // laufende Messungen unter der Schwelle
+static uint8_t touch_max_dip = 0;      // laengste Absenkung seit dem Start (Diagnose)
 
 // WiFi State Variables
 typedef struct {
@@ -632,6 +634,14 @@ static void touch_key_task(void *pvParameters)
                 }
                 release_samples = 0;
 
+                // Diagnose: Dauer der Absenkung mitzaehlen
+                if (touch_dip_run < UINT8_MAX) {
+                    touch_dip_run++;
+                }
+                if (touch_dip_run > touch_max_dip) {
+                    touch_max_dip = touch_dip_run;
+                }
+
                 if (!touch_active && touch_samples >= TOUCH_KEY_DEBOUNCE_COUNT) {
                     touch_active = true;
                     ESP_LOGI(TAG, "Touch key pressed (value=%u baseline=%u)", touch_value, touch_key_baseline);
@@ -641,6 +651,7 @@ static void touch_key_task(void *pvParameters)
                     release_samples++;
                 }
                 touch_samples = 0;
+                touch_dip_run = 0;
 
                 if (touch_active && release_samples >= TOUCH_KEY_RELEASE_COUNT) {
                     touch_active = false;
@@ -1527,6 +1538,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"baseline\":%u,"
         "\"value\":%u,"
         "\"min_value\":%u,"
+        "\"max_dip\":%u,"
         "\"enabled\":%s"
         "},"
         "\"system\":{"
@@ -1541,6 +1553,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"cpu_top_task\":\"%s\","
         "\"cpu_top_task_percent\":%lu,"
         "\"cpu_task_count\":%lu,"
+        "\"reset_reason\":%d,"
         "\"build_number\":%d,"
         "\"api_version\":\"%s\""
         "}"
@@ -1572,6 +1585,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         (unsigned int)touch_key_baseline,
         (unsigned int)touch_last_value,
         (unsigned int)touch_min_value,
+        (unsigned int)touch_max_dip,
         touch_key_enabled ? "true" : "false",
         free_mem,
         uptime_ms,
@@ -1584,6 +1598,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         escaped_cpu_top_task,
         (unsigned long)cpu_top_task_percent,
         (unsigned long)cpu_task_count,
+        (int)esp_reset_reason(),
         BUILD_NUMBER,
         API_VERSION
     );

@@ -86,8 +86,8 @@
 // der Wert nur um ~0.6 % (ruhig), eine kraeftige Beruehrung senkt ihn auf ~3 %.
 // Vorher stand hier 70 (30 % Absenkung) - damit wurden leichte Tipps nicht erkannt.
 #define TOUCH_KEY_THRESHOLD_PERCENT     85      // Touch erkannt unter 85% der Basislinie
-#define TOUCH_KEY_DEBOUNCE_COUNT        3       // Touch muss 3 Samples stabil sein (stabilere Erkennung)
-#define TOUCH_KEY_RELEASE_COUNT         3       // Release muss 3 Samples stabil sein (stabilere Release-Erkennung)
+#define TOUCH_KEY_DEBOUNCE_COUNT        1       // Kurze Tipps genuegen (Wert muss nur 1x unter der Schwelle liegen)
+#define TOUCH_KEY_RELEASE_COUNT         2       // Release nach 2 Messungen (~60 ms) - kurze Tipps sauber trennen
 #define TOUCH_KEY_DOUBLE_PRESS_MS       500     // Timeout fuer Double-Press Erkennung (500ms)
 
 // ============================================================================
