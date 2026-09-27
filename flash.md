@@ -4,7 +4,7 @@ Exakte Schritt-für-Schritt Anleitung zum Flashen der ESP32-Firmware über USB u
 
 ## Voraussetzungen
 
-1. **ESP32-D Board** mit USB-Kabel verbunden
+1. **ESP32-DEVKITC-V4** mit USB-Kabel verbunden
 2. **ESP-IDF 6.1** installiert
 3. **COM-Port** bekannt (z.B. COM3)
 4. **Projekt-Verzeichnis** (bosch-tank)
@@ -32,7 +32,7 @@ Done! You can now compile ESP-IDF projects.
 ### 2. Projekt-Verzeichnis wechseln
 
 ```bash
-cd C:\Users\win4g\Downloads\GitHub\VS-Projekte\bosch-tank
+cd C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\bosch-tank
 ```
 
 ### 3. Build durchführen
@@ -44,7 +44,7 @@ idf.py build
 **Erwartete Ausgabe:**
 ```
 Executing action: all (aliases: build)
-Running ninja in directory C:\Users\win4g\Downloads\GitHub\VS-Projekte\bosch-tank\build
+Running ninja in directory C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\bosch-tank\build
 ...
 Project build complete. To flash, run:
  idf.py flash
@@ -98,7 +98,7 @@ idf.py -p COM3 monitor
 Connecting....
 Connected to ESP32 on COM3:
 Chip type:          ESP32-D0WD-V3 (revision v3.1)
-Features:           Wi-Fi, BT, Dual Core + LP Core, 240MHz
+Features:           Wi-Fi, BT, Dual Core, 240MHz
 Crystal frequency:  40MHz
 MAC:                6c:c8:40:5b:f6:ac
 
@@ -211,7 +211,7 @@ echo 1. ESP-IDF Umgebung aktivieren...
 cmd /c "C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\esp-idf\export.bat"
 
 echo 2. In Projekt-Verzeichnis wechseln...
-cd /d "C:\Users\win4g\Downloads\GitHub\VS-Projekte\bosch-tank"
+cd /d "C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\bosch-tank"
 
 echo 3. Build und Flash...
 idf.py -p COM3 flash monitor

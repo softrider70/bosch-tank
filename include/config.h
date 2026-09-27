@@ -16,6 +16,17 @@
 // ============================================================================
 
 #define GPIO_LED_STATUS     2       // Onboard LED (Status-Anzeige)
+// Polaritaet der Onboard-LED: am Modul LOW-aktiv (0 = an, 1 = aus).
+// Beobachtet am 2026-09-27: die LED leuchtete dauerhaft, obwohl die Firmware
+// mit aktiver Logik 0 ("aus") geschrieben hat.
+#define LED_ON_LEVEL        0
+#define LED_OFF_LEVEL       1
+// TEST-MUSTER: 1 = GPIO 2 blinkt dauernd (10 s an/aus im 250-ms-Takt).
+// Ergebnis 2026-09-27: am verbauten Modul aendert sich nichts - die rote LED
+// ist die Betriebsspannungs-Anzeige und haengt NICHT an GPIO 2. Deshalb 0.
+// Fuer eine externe LED (GPIO 2 -> Vorwiderstand -> LED -> GND) wieder auf 1
+// setzen bzw. das Blinken direkt nutzen.
+#define LED_TEST_PATTERN    0
 #define GPIO_I2C_SDA        21      // ToF-Sensor SDA (Data)
 #define GPIO_I2C_SCL        22      // ToF-Sensor SCL (Clock)
 #define GPIO_VALVE_CONTROL  32      // GPIO für externen Transistor zur Ventilsteuerung
@@ -34,6 +45,21 @@
 #define I2C_TIMEOUT_MS      10000               // 10s timeout
 
 #define TOF_SENSOR_ADDR     0x29                // Standard I2C address for VL6150X/VL6180X-compatible TOF sensors
+
+// ============================================================================
+// HARDWARE-VORGABE ToF-Sensor (hat Vorrang vor allem anderen!)
+// ============================================================================
+// Der Sensor misst nur unterhalb von ca. 18 cm zuverlaessig. Alles darueber
+// beantwortet er mit dem Festwert 25 cm. 25 cm heisst also "keine gueltige
+// Messung" - NICHT "Tank ist 25 cm leer".
+// Folgen fuer den Code:
+//   - Schwellwerte (OBEN/UNTEN/25cm-Stop) immer zwischen 1 und 17 cm halten
+//     (Server und Web-Oberflaeche pruefen das auch).
+//   - Messwert >= 25 cm: kein automatisches Befuellen, laufendes Befuellen
+//     wird geschlossen (25-cm-Sperre im valve_task).
+//   - Manuelles Befuellen darf bei >= 25 cm starten, laeuft aber nur mit der
+//     15-Sekunden-Ueberwachung und dem Stop-Schwellenwert.
+// Wer diese Regel aendert, muss die 25-cm-Sperre im valve_task mit anpassen.
 
 // ============================================================================
 // Sensor Configuration (Distance Measurement)
@@ -55,9 +81,13 @@
 #define TOUCH_KEY_SAMPLE_MS             30      // Polling fuer Touch-Erkennung (schnellere Reaktion)
 #define TOUCH_KEY_FILTER_PERIOD_MS      10      // IIR Filter-Zyklus
 #define TOUCH_KEY_CALIBRATION_SAMPLES   12      // Messungen fuer Start-Baseline
-#define TOUCH_KEY_THRESHOLD_PERCENT     70      // Touch erkannt unter 70% der Basislinie (empfindlicher)
-#define TOUCH_KEY_DEBOUNCE_COUNT        3       // Touch muss 3 Samples stabil sein (stabilere Erkennung)
-#define TOUCH_KEY_RELEASE_COUNT         3       // Release muss 3 Samples stabil sein (stabilere Release-Erkennung)
+// Schwelle: Touch erkannt, wenn der Wert unter diesen Anteil der Baseline faellt.
+// 85 = 15 % Absenkung genuegt. Am 2026-09-27 gemessen: ohne Beruehrung schwankt
+// der Wert nur um ~0.6 % (ruhig), eine kraeftige Beruehrung senkt ihn auf ~3 %.
+// Vorher stand hier 70 (30 % Absenkung) - damit wurden leichte Tipps nicht erkannt.
+#define TOUCH_KEY_THRESHOLD_PERCENT     85      // Touch erkannt unter 85% der Basislinie
+#define TOUCH_KEY_DEBOUNCE_COUNT        1       // Kurze Tipps genuegen (Wert muss nur 1x unter der Schwelle liegen)
+#define TOUCH_KEY_RELEASE_COUNT         2       // Release nach 2 Messungen (~60 ms) - kurze Tipps sauber trennen
 #define TOUCH_KEY_DOUBLE_PRESS_MS       500     // Timeout fuer Double-Press Erkennung (500ms)
 
 // ============================================================================
@@ -65,7 +95,7 @@
 // ============================================================================
 
 // Magnetventil-Timeout beim Befüllen
-#define VALVE_TIMEOUT_MAX_DEFAULT       60000   // 60 Sekunden max. Befüllung
+#define VALVE_TIMEOUT_MAX_DEFAULT       40000   // 40 Sekunden max. Befuellung (Notbremse)
 #define VALVE_TIMEOUT_CHECK_MS          1000    // Alle 1s prüfen
 #define TASK_VALVE_CHECK_MS             200     // Schnelle Reaktion fuer Sicherheitsabschaltung
 
@@ -76,7 +106,7 @@
 
 // Cooldown und manuelle Befuellung bei 25cm
 #define FILL_STOP_COOLDOWN_MS           5000    // 5 Sekunden Beruhigungszeit nach OBEN
-#define MANUAL_FILL_25CM_MONITOR_MS     15000   // 15 Sekunden Ueberwachung auf Werte < 25 (Fallback)
+#define MANUAL_FILL_25CM_MONITOR_MS     6000    // 6 Sekunden Ueberwachung (reicht fuer 25 -> 18 cm)
 #define MANUAL_FILL_25CM_STOP_THRESHOLD_CM 23   // Stop bei diesem Wert (Default 23cm)
 
 // Ventil-PWM oder Digital
@@ -108,14 +138,25 @@
 #define NVS_KEY_OTA_PHASE               "ota_phase"
 #define NVS_KEY_OTA_MESSAGE             "ota_message"
 #define NVS_KEY_OTA_LAST_ERROR          "ota_last_error"
-#define NVS_KEY_OTA_CURRENT_VERSION     "ota_current_version"
-#define NVS_KEY_OTA_TARGET_VERSION      "ota_target_version"
+#define NVS_KEY_OTA_CURRENT_VERSION     "ota_cur_ver"       // max. 15 Zeichen!
+#define NVS_KEY_OTA_TARGET_VERSION      "ota_tgt_ver"       // max. 15 Zeichen!
 #define NVS_KEY_OTA_URL                 "ota_url"
 #define NVS_KEY_EMERGENCY_STOP          "emerg_stop"
+#define NVS_KEY_EMERGENCY_REASON        "emerg_reason"  // Grund des Notaus (max. 15 Zeichen)
 #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
-#define NVS_KEY_ERROR_LOG               "error_log"
-#define NVS_KEY_WIFI_SLEEP_START_HOUR   "wifi_sleep_start"  // WiFi-Sleep Start-Stunde (0-23)
-#define NVS_KEY_WIFI_SLEEP_END_HOUR     "wifi_sleep_end"    // WiFi-Sleep End-Stunde (0-23)
+#define NVS_KEY_API_PASS                "api_pass"      // Passwort fuer die Weboberflaeche (Basic Auth)
+#define NVS_KEY_WIFI_SLEEP_START_HOUR   "sleep_start_h"     // WiFi-Sleep Start-Stunde (0-23)
+#define NVS_KEY_WIFI_SLEEP_END_HOUR     "sleep_end_h"       // WiFi-Sleep End-Stunde (0-23)
+
+// Zugangsschutz der Weboberflaeche (HTTP Basic Auth).
+// Passwort: API_PASSWORD_DEFAULT fest vorgeben. Bleibt der Wert leer (""),
+// wird beim ersten Start ein zufaelliges Passwort erzeugt und im NVS gespeichert.
+// Das aktive Passwort steht bei jedem Start im seriellen Log.
+// Zum Abschalten (z. B. wenn man sich ausgesperrt hat): API_AUTH_ENABLED 0.
+#define API_AUTH_ENABLED                1
+#define API_AUTH_REALM                  "bosch-tank"
+#define API_PASSWORD_LEN                16      // maximale Laenge des Passworts
+#define API_PASSWORD_DEFAULT            "boschtank"
 
 // NVS String-Längen
 #define NVS_SSID_MAX_LEN                32

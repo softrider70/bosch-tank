@@ -25,7 +25,8 @@ Makefile
 sdkconfig
 sdkconfig.old
 
-# Local diagnostics and ad-hoc experiment artifacts
+# Lokale Diagnose- und Ad-hoc-Artefakte
+git_diff_output.txt
 tools/__pycache__/
 *_monitor.txt
 *serial*.txt
@@ -49,6 +50,7 @@ wifi_test_monitor.txt
 # Local build/flash state
 .last_built_commit
 .last_flash_mode.json
+.build_stamp
 
 # Embedded git repositories
 ota-safe-template/

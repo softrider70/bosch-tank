@@ -24,14 +24,14 @@ Dieses Projekt wurde aus `delonghi-tank` abgeleitet. Beide Projekte teilen die G
 - Sensor-Begrenzung auf 18cm (Werte darueber als 25cm angezeigt)
 - UNTEN-Bestätigung (7 aufeinanderfolgende Messungen gegen Sensorrauschen)
 - Sonderbehandlung manuelle Fuellung bei 25cm mit 15s-Timeout
-- LED-Indikator fuer WiFi-Sleep und Notaus
+- Status-LED fuer Ventil/Notaus (am verbauten Modul nicht schaltbar, siehe Abschnitt LED)
 
 ### Tooling-Unterschiede
 
 | Merkmal | delonghi-tank | bosch-tank |
 |---------|---------------|------------|
 | Build-Skript | `tools/build.ps1` | `tools/build-and-commit.ps1` |
-| OTA-Server | Manuell starten | Automatisch durch Build-Skript |
+| OTA-Server | Manuell starten | Manuell starten |
 | Partition-Datei | `partitions_ota_custom.csv` | `partitions.csv` |
 | .venv | Ja | Nein |
 | Durchfluss-Default | 10.0 L/min | 1.0 L/min |
@@ -120,7 +120,10 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
   - Automatisch: Wenn Wasserstand unter OBEN sinkt
   - Manuell: Touch-Key (Dreifach-Press)
 - Außerhalb des Zeitfensters (05:00-19:00) ist WiFi immer aktiv
-- **LED-Indikator:** Status-LED blinkt langsam bei WiFi-Sleep-Mode und bei Notaus
+- **Status-LED:** LED an = Ventil offen, langsames Blinken bei WiFi-Sleep-Mode oder Notaus.
+  Wichtig: Am verbauten Modul treibt **GPIO 2 keine LED** (die rote LED ist die Betriebsanzeige,
+  am 2026-09-27 per Blinktest geprueft). Mit einer externen LED an GPIO 2 (Vorwiderstand 330 Ohm
+  nach GND) funktioniert die Anzeige ohne Codeaenderung.
 - Konfiguration über Web-UI (Start/Endzeit)
 - Validierung: 0-23, Start != End
 
@@ -155,6 +158,25 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
     - Timeout
     - Fill-Progress-Timeout
     - Durchfluss in L/min
+
+### Zugangsschutz (Benutzer und Passwort)
+
+Die Web-Oberflaeche und alle API-Aufrufe sind mit einem Passwort geschuetzt
+(HTTP Basic Auth). Der Browser fragt von selbst danach - ein Login-Formular
+gibt es nicht, der Benutzername ist beliebig.
+
+- Das Passwort steht in `include/config.h` (`API_PASSWORD_DEFAULT`, aktuell
+  `boschtank`) und zusaetzlich bei jedem Start im seriellen Protokoll:
+  `🔑 Weboberflaeche: Benutzer beliebig, Passwort: boschtank`
+- Bleibt `API_PASSWORD_DEFAULT` leer (`""`), wird beim ersten Start ein
+  zufaelliges Passwort erzeugt und im NVS gespeichert.
+- Aendern: Wert in `include/config.h` anpassen und neu flashen.
+- Fuer Skripte: Passwort in die Umgebungsvariable `BOSCH_TANK_PASS` legen.
+  `ota.ps1`, `ota_upload.ps1` und `tools/flash-mode.ps1` nutzen sie automatisch.
+- Kurzzeitig abschalten: in `include/config.h` `API_AUTH_ENABLED` auf `0`
+  setzen und neu flashen. Nur fuer Fehlersuche gedacht.
+- Die Seite `/generate_204` (Erkennung des Anmelde-Portals im AP-Modus) bleibt
+  bewusst ohne Passwort, sonst meckern Handy und Windows beim Verbinden.
 
 ## Chat-Anforderungen
 
@@ -222,7 +244,7 @@ Die aktuelle Firmware validiert Konfiguration wie folgt:
 Wenn der automatische Flash nicht funktioniert oder die Ausgabe sichtbar sein soll:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
+powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
 ```
 
 **Wichtige Parameter:**
@@ -240,7 +262,7 @@ Wenn COM3 busy ist (PermissionError 13):
 powershell -Command "Stop-Process -Name python -Force"
 
 # Danach erneut flashen
-powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
+powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
 ```
 
 ### Mutex-Initialisierungsfehler
@@ -299,7 +321,7 @@ USB:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\flash-mode.ps1 -Mode usb [-UsbPort <serial port>]
 ```
 
-Wenn `-UsbPort` nicht angegeben ist, versucht das Skript automatisch, einen seriellen Port zu erkennen. Bei mehreren gefundenen Ports verwendet es bevorzugt `COM3`, sonst fragt es dich zur Angabe auf.
+Wenn `-UsbPort` nicht angegeben ist, sucht das Skript selbst nach einem seriellen Port. Sind mehrere vorhanden, nimmt es den ersten gefundenen - dann bitte den Port mit `-UsbPort` fest vorgeben.
 
 OTA:
 
@@ -327,14 +349,10 @@ Was der OTA-Modus automatisch macht:
 - Port: `8070` (kein Admin nötig auf Windows)
 - Firmware-URL: `http://192.168.1.191:8070/bosch-tank.bin`
 
-**Automatischer Start durch Build-Skript:**
-Das Build-Skript `tools/build-and-commit.ps1` startet den OTA-Server automatisch nach jedem Build:
-- Prüft, ob der Server bereits läuft
-- Testet, ob der Server antwortet (HTTP HEAD auf `/bosch-tank.bin`)
-- Startet den Server bei Bedarf im Hintergrund (nicht blockend)
-- Firmware ist sofort unter `http://192.168.1.191:8070/bosch-tank.bin` erreichbar
+**Start durch das Build-Skript:**
+`tools/build-and-commit.ps1` baut, committet und pusht - es startet **keinen** OTA-Server. Der Server muss von Hand gestartet werden.
 
-**Manueller Start (falls nötig):**
+**Manueller Start:**
 ```powershell
 cd build && python -m http.server 8070
 ```

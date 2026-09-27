@@ -50,7 +50,8 @@
 
 // Network utilities
 // #include "mdns.h"  // TODO: Add mdns to CMakeLists.txt REQUIRES
-// #include "esp_sntp.h"  // TODO: Add esp_sntp to CMakeLists.txt REQUIRES
+#include "esp_sntp.h"   // Zeitquelle fuer den WiFi-Schlafmodus (Komponente: lwip)
+#include "mbedtls/base64.h"   // fuer die Basic-Auth-Pruefung der Weboberflaeche
 
 // Project Config
 #include "config.h"
@@ -163,9 +164,34 @@ static i2c_master_dev_handle_t vl53l0x_dev_handle = NULL;
 #define GPIO_TOUCH_KEY 27
 #define TOUCH_KEY_FILTER_PERIOD_MS 10
 // Makros aus config.h werden verwendet, keine Redefinition
+#endif
+// Status der Touch-Taste: ausserhalb der Zielabfrage, damit der Status-Endpunkt
+// sie auf jedem Ziel ausgeben kann (auf anderen Zielen bleiben sie 0/false).
 static bool touch_key_enabled = false;
 static uint16_t touch_key_baseline = 0;
-#endif
+// Diagnose: erkannte Betaetigungen, letzte Auswertung (1/2/3 Tipps), letzter Messwert
+static uint32_t touch_press_count = 0;
+static uint8_t touch_last_presses = 0;
+static uint16_t touch_last_value = 0;
+static uint16_t touch_min_value = 0;   // niedrigster Wert seit dem Start (Diagnose)
+static uint8_t touch_dip_run = 0;      // laufende Messungen unter der Schwelle
+static uint8_t touch_max_dip = 0;      // laengste Absenkung seit dem Start (Diagnose)
+
+// Passwort fuer die Weboberflaeche (HTTP Basic Auth). Wird beim ersten Start
+// erzeugt, im NVS abgelegt und bei jedem Start im seriellen Log ausgegeben.
+static char api_password[API_PASSWORD_LEN + 1] = {0};
+
+/**
+ * @brief Erzeugt ein zufaelliges Passwort (ohne i, l, o, 0, 1 - verwechselbar).
+ */
+static void generate_api_password(void)
+{
+    static const char alphabet[] = "abcdefghjkmnpqrstuvwxyz23456789";
+    for (int i = 0; i < API_PASSWORD_LEN; i++) {
+        api_password[i] = alphabet[esp_random() % (sizeof(alphabet) - 1)];
+    }
+    api_password[API_PASSWORD_LEN] = '\0';
+}
 
 // WiFi State Variables
 typedef struct {
@@ -197,7 +223,7 @@ typedef struct {
     char url[192];
     uint64_t last_start_ms;
     uint64_t last_end_ms;
-    uint64_t boot_time_ms;  // Boot-Zeit für Health-Check
+    uint64_t boot_time_ms;  // Boot-Zeit fuer Health-Check
     bool health_check_passed;  // Health-Check nach OTA
 } ota_state_t;
 
@@ -220,6 +246,7 @@ static void get_system_state_snapshot(system_state_t *snapshot);
 static void set_manual_fill_active(bool active);
 static esp_err_t request_manual_fill(bool enable, const char *source, bool *manual_fill_active_out, const char **message_out);
 static void trigger_emergency_stop(const char *reason);
+static void reset_emergency_stop(void);
 static void ota_update_task(void *pvParameters);
 static void ota_health_check_task(void *pvParameters);
 
@@ -368,20 +395,89 @@ static esp_err_t init_nvs(void)
         sys_state.emergency_stop_active = (bool)stored_emergency;
         ESP_LOGI(TAG, "Loaded emergency_stop_active from NVS: %d", sys_state.emergency_stop_active);
     }
+
+    // Grund des Notaus mitladen - sonst stand nach einem Neustart "Notaus aktiv"
+    // ohne erkennbare Ursache in der Oberflaeche.
+    size_t reason_len = sizeof(sys_state.emergency_stop_reason);
+    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_EMERGENCY_REASON, sys_state.emergency_stop_reason, &reason_len) == ESP_OK) {
+        sys_state.emergency_stop_reason[sizeof(sys_state.emergency_stop_reason) - 1] = '\0';
+        if (sys_state.emergency_stop_reason[0] != '\0') {
+            ESP_LOGW(TAG, "Notaus-Grund aus NVS: %s", sys_state.emergency_stop_reason);
+        }
+    }
     
+    // Passwort fuer die Weboberflaeche: fest aus config.h, sonst aus dem NVS,
+    // sonst neu erzeugen. Abschrift im NVS haelt beide Stellen gleich.
+    if (API_PASSWORD_DEFAULT[0] != '\0') {
+        snprintf(api_password, sizeof(api_password), "%s", API_PASSWORD_DEFAULT);
+        nvs_set_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password);
+        nvs_commit(sys_state.nvs_handle);
+    } else {
+        size_t api_pass_len = sizeof(api_password);
+        if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password, &api_pass_len) != ESP_OK ||
+            api_password[0] == '\0') {
+            generate_api_password();
+            nvs_set_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password);
+            nvs_commit(sys_state.nvs_handle);
+            ESP_LOGW(TAG, "🔑 Neues Passwort fuer die Weboberflaeche erzeugt");
+        }
+    }
+    ESP_LOGW(TAG, "🔑 Weboberflaeche: Benutzer beliebig, Passwort: %s", api_password);
+
     ESP_LOGI(TAG, "NVS initialized successfully");
     return ESP_OK;
 }
-
 // ============================================================================
 // Phase 1: I2C Initialization (for VL6150X/VL6180X TOF sensor)
 // ============================================================================
+
+/**
+ * @brief Diagnose: Pegel von SDA/SCL messen, bevor der I2C-Treiber die Pins uebernimmt.
+ *
+ * Erste Messung ohne interne Pull-ups: zeigt, ob die externen Pull-ups der
+ * Sensorplatine wirken und versorgt sind. Zweite Messung mit internen Pull-ups.
+ * Ausgabe: 1 = HIGH, 0 = LOW.
+ */
+static void log_i2c_line_levels(void)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << GPIO_I2C_SDA) | (1ULL << GPIO_I2C_SCL),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+
+    gpio_config(&cfg);
+    vTaskDelay(pdMS_TO_TICKS(5));          // Pegel einschwingen lassen
+    int sda_ohne = gpio_get_level(GPIO_I2C_SDA);
+    int scl_ohne = gpio_get_level(GPIO_I2C_SCL);
+
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;   // interne Pull-ups zuschalten
+    gpio_config(&cfg);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    int sda_mit = gpio_get_level(GPIO_I2C_SDA);
+    int scl_mit = gpio_get_level(GPIO_I2C_SCL);
+
+    ESP_LOGI(TAG, "🔎 Bus-Pegel ohne interne Pull-ups: SDA=%d SCL=%d", sda_ohne, scl_ohne);
+    ESP_LOGI(TAG, "🔎 Bus-Pegel mit  internen Pull-ups: SDA=%d SCL=%d", sda_mit, scl_mit);
+
+    if (sda_ohne == 1 && scl_ohne == 1) {
+        ESP_LOGI(TAG, "   Externe Pull-ups wirken - Bus ist elektrisch versorgt");
+    } else if (sda_mit == 1 && scl_mit == 1) {
+        ESP_LOGW(TAG, "   Keine externen Pull-ups wirksam - interne Pull-ups sind noetig");
+    } else {
+        ESP_LOGE(TAG, "   Leitung haengt auf LOW - Kurzschluss oder falscher Pin");
+    }
+}
 
 /**
  * @brief Initialize I2C bus for VL6150X/VL6180X-compatible TOF sensor (ESP-IDF v6.0 API)
  */
 static esp_err_t init_i2c(void)
 {
+    log_i2c_line_levels();
+
     ESP_LOGI(TAG, "Initializing I2C bus (ESP-IDF v6.0)...");
 
     i2c_master_bus_config_t bus_config = {
@@ -392,8 +488,8 @@ static esp_err_t init_i2c(void)
         .glitch_ignore_cnt = 7,
         .intr_priority = 0,
         .trans_queue_depth = 0,
-        // External 4.7k pull-ups are present on the TOF sensor board,
-        // so disable the ESP32 internal I2C pull-ups to avoid conflicts.
+        // Gegenprobe: interne Pull-ups wieder aus. Die Pegelmessung oben zeigt,
+        // ob die externen Pull-ups der Sensorplatine allein ausreichen.
         .flags.enable_internal_pullup = false,
         .flags.allow_pd = false,
     };
@@ -427,6 +523,14 @@ static esp_err_t init_i2c(void)
 // ============================================================================
 // Phase 1: GPIO Initialization (Valve control + LED)
 // ============================================================================
+
+/**
+ * @brief Status-LED schalten. Polaritaet steht in config.h (LED an = Ventil offen).
+ */
+static void set_status_led(bool on)
+{
+    gpio_set_level(GPIO_LED_STATUS, on ? LED_ON_LEVEL : LED_OFF_LEVEL);
+}
 
 /**
  * @brief Initialize GPIO pins for valve and LED control
@@ -467,7 +571,7 @@ static esp_err_t init_gpio(void)
     
     // Brownout protection: Close valve immediately
     gpio_set_level(GPIO_VALVE_CONTROL, 0);  // LOW = closed
-    gpio_set_level(GPIO_LED_STATUS, 1);     // HIGH = LED on (status: init)
+    set_status_led(true);                   // LED an waehrend der Initialisierung
     
     ESP_LOGI(TAG, "GPIO initialized - Valve on GPIO %d, LED on GPIO %d", 
              GPIO_VALVE_CONTROL, GPIO_LED_STATUS);
@@ -478,22 +582,48 @@ static esp_err_t init_gpio(void)
 static esp_err_t init_touch_key(void)
 {
     // Touch-Pad initialisieren (ESP-IDF 6.1 kompatibel)
+    ESP_LOGI(TAG, "   [Touch] touch_pad_init...");
     touch_pad_init();
+    ESP_LOGI(TAG, "   [Touch] touch_pad_set_voltage...");
     touch_pad_set_voltage(TOUCH_HVOLT_KEEP, TOUCH_LVOLT_KEEP, TOUCH_HVOLT_ATTEN_1V);
+    ESP_LOGI(TAG, "   [Touch] touch_pad_config...");
     touch_pad_config(TOUCH_KEY_PAD, 0);
+    ESP_LOGI(TAG, "   [Touch] touch_pad_filter_start...");
     touch_pad_filter_start(TOUCH_KEY_FILTER_PERIOD_MS);
+    // Filter erst einschwingen lassen - ein sofortiger read kann haengen (erlebt
+    // am 2026-09-27: Boot blieb ohne Meldung bei "Testing touch key init..." stehen).
+    vTaskDelay(pdMS_TO_TICKS(200));
+    ESP_LOGI(TAG, "   [Touch] Baseline messen (100x)...");
 
-    // Baseline messen
+    // Baseline messen.
+    // WICHTIG: hier NICHT touch_pad_read() verwenden. Die Funktion loest eine
+    // Messung aus und wartet unbegrenzt auf das FSM-Flag (Beleg: ESP-IDF
+    // touch_sensor.c, _touch_pad_read: "while (!touch_hal_meas_is_done())").
+    // Mit laufendem Filter kann dieses Flag ausbleiben, dann haengt der Boot
+    // ohne jede Meldung (erlebt am 2026-09-27, dreimal reproduziert).
+    // touch_pad_read_filtered() liest den Filterwert und passt zum Sensor-Task,
+    // der ebenfalls gefiltert liest.
     uint16_t touch_value = 0;
     for (int i = 0; i < 100; i++) {
-        touch_pad_read(TOUCH_KEY_PAD, &touch_value);
-        touch_key_baseline = (uint16_t)(((uint32_t)touch_key_baseline * 9U + touch_value) / 10U);
+        if (touch_pad_read_filtered(TOUCH_KEY_PAD, &touch_value) == ESP_OK && touch_value > 0) {
+            touch_key_baseline = (uint16_t)(((uint32_t)touch_key_baseline * 9U + touch_value) / 10U);
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
+        if ((i % 25) == 24) {
+            ESP_LOGI(TAG, "   [Touch] %d/100 (value=%u baseline=%u)", i + 1, touch_value, touch_key_baseline);
+        }
     }
 
     ESP_LOGI(TAG, "Touch key initialized - baseline: %u", touch_key_baseline);
     touch_key_enabled = true;
     return ESP_OK;
+}
+#else
+// Andere Ziele (ESP32-C3/S3/...) haben keinen Legacy-Touch-Treiber. Stub, damit
+// der Aufruf in app_main unveraendert bleiben kann.
+static esp_err_t init_touch_key(void)
+{
+    return ESP_ERR_NOT_SUPPORTED;
 }
 #endif
 
@@ -510,6 +640,18 @@ static void touch_key_task(void *pvParameters)
     while (1) {
         uint16_t touch_value = 0;
         esp_err_t ret = touch_pad_read_filtered(TOUCH_KEY_PAD, &touch_value);
+        touch_last_value = touch_value;
+        // Diagnose: neuen Tiefstwert mitschreiben und melden (zeigt die Wirkung
+        // einer Beruehrung; ohne Beruehrung passiert hier nichts)
+        if (touch_value > 0 && (touch_min_value == 0 || touch_value < touch_min_value)) {
+            touch_min_value = touch_value;
+            if (touch_key_baseline > 0 &&
+                touch_value < (uint16_t)(((uint32_t)touch_key_baseline * 95U) / 100U)) {
+                ESP_LOGI(TAG, "Touch-Rohwert neu tief: %u (Baseline %u = %u%%)",
+                         touch_value, touch_key_baseline,
+                         (unsigned)(((uint32_t)touch_value * 100U) / touch_key_baseline));
+            }
+        }
         uint64_t now_ms = esp_timer_get_time() / 1000;
 
         if (ret == ESP_OK && touch_value > 0 && touch_key_baseline > 0) {
@@ -526,6 +668,14 @@ static void touch_key_task(void *pvParameters)
                 }
                 release_samples = 0;
 
+                // Diagnose: Dauer der Absenkung mitzaehlen
+                if (touch_dip_run < UINT8_MAX) {
+                    touch_dip_run++;
+                }
+                if (touch_dip_run > touch_max_dip) {
+                    touch_max_dip = touch_dip_run;
+                }
+
                 if (!touch_active && touch_samples >= TOUCH_KEY_DEBOUNCE_COUNT) {
                     touch_active = true;
                     ESP_LOGI(TAG, "Touch key pressed (value=%u baseline=%u)", touch_value, touch_key_baseline);
@@ -535,79 +685,82 @@ static void touch_key_task(void *pvParameters)
                     release_samples++;
                 }
                 touch_samples = 0;
+                touch_dip_run = 0;
 
                 if (touch_active && release_samples >= TOUCH_KEY_RELEASE_COUNT) {
                     touch_active = false;
-                    press_count++;
+                    touch_press_count++;
 
-                    // Zeit seit letztem Press prüfen
-                    if (now_ms - last_press_time_ms > TOUCH_KEY_DOUBLE_PRESS_MS) {
-                        press_count = 1;  // Reset wenn zu lange Zeit vergangen
+                    // Nur zaehlen - ausgewertet wird erst nach Ablauf des Fensters
+                    if (press_count < 3) {
+                        press_count++;
                     }
                     last_press_time_ms = now_ms;
+                }
+            }
+        }
 
-                    // Warten auf weitere Presses (Timeout für Dreifach-Press)
-                    vTaskDelay(pdMS_TO_TICKS(TOUCH_KEY_DOUBLE_PRESS_MS));
+        // Auswertung erst nach Ablauf des Doppeldruck-Fensters.
+        // Frueher blockierte ein vTaskDelay genau dieses Fenster, dadurch blieb
+        // press_count immer 1 und Doppel-/Dreifachdruck waren nie erreichbar.
+        if (press_count > 0 && (now_ms - last_press_time_ms) > TOUCH_KEY_DOUBLE_PRESS_MS) {
+            uint8_t presses = press_count;
+            press_count = 0;
+            touch_last_presses = presses;
 
-                    // Prüfen, ob weitere Presses innerhalb des Zeitfensters
-                    if (press_count >= 3) {
-                        // Dreifach-Press: WiFi aufwecken
-                        system_state_t state_snapshot;
-                        get_system_state_snapshot(&state_snapshot);
+            if (presses >= 3) {
+                // Dreifach-Press: WiFi aufwecken
+                system_state_t state_snapshot;
+                get_system_state_snapshot(&state_snapshot);
 
-                        if (state_snapshot.wifi_sleep_active) {
-                            ESP_LOGI(TAG, "🌅 Touch key: Dreifach-Press - WiFi aufwecken");
-                            esp_wifi_start();
-                            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-                            sys_state.wifi_sleep_active = false;
-                            sys_state.wifi_sleep_hysteresis_start_ms = 0;
-                            xSemaphoreGive(sys_state_mutex);
-                        } else {
-                            ESP_LOGI(TAG, "Touch key: Dreifach-Press - WiFi bereits aktiv");
-                        }
-                        press_count = 0;
-                    } else if (press_count == 2) {
-                        // Doppelpress: Notaus auslösen
-                        system_state_t state_snapshot;
-                        get_system_state_snapshot(&state_snapshot);
+                if (state_snapshot.wifi_sleep_active) {
+                    ESP_LOGI(TAG, "🌅 Touch key: Dreifach-Press - WiFi aufwecken");
+                    esp_wifi_start();
+                    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                    sys_state.wifi_sleep_active = false;
+                    sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                    xSemaphoreGive(sys_state_mutex);
+                } else {
+                    ESP_LOGI(TAG, "Touch key: Dreifach-Press - WiFi bereits aktiv");
+                }
+            } else if (presses == 2) {
+                // Doppelpress: Notaus umschalten (ausloesen ODER zuruecksetzen).
+                // Vorher liess sich der Notaus nur ueber die Weboberflaeche
+                // zuruecksetzen - am Geraet ging gar nichts.
+                system_state_t state_snapshot;
+                get_system_state_snapshot(&state_snapshot);
 
-                        if (!state_snapshot.emergency_stop_active) {
-                            ESP_LOGI(TAG, "🚨 Touch key: Doppelpress - Notaus auslösen");
-                            trigger_emergency_stop("Touch key double press");
-                        } else {
-                            ESP_LOGI(TAG, "Touch key: Doppelpress - Notaus bereits aktiv");
-                        }
-                        press_count = 0;
+                if (state_snapshot.emergency_stop_active) {
+                    ESP_LOGI(TAG, "♻️  Touch key: Doppelpress - Notaus zuruecksetzen");
+                    reset_emergency_stop();
+                } else {
+                    ESP_LOGI(TAG, "🚨 Touch key: Doppelpress - Notaus ausloesen");
+                    trigger_emergency_stop("Touch key double press");
+                }
+            } else {
+                // Einfacher Press: zuerst WiFi aufwecken, sonst manuelles Befuellen umschalten
+                system_state_t state_snapshot;
+                get_system_state_snapshot(&state_snapshot);
+
+                if (state_snapshot.wifi_sleep_active) {
+                    ESP_LOGI(TAG, "🌅 Touch key: Einfacher Press - WiFi aufwecken");
+                    esp_wifi_start();
+                    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+                    sys_state.wifi_sleep_active = false;
+                    sys_state.wifi_sleep_hysteresis_start_ms = 0;
+                    xSemaphoreGive(sys_state_mutex);
+                } else {
+                    bool manual_fill_active = false;
+                    const char *message = NULL;
+                    esp_err_t request_err = request_manual_fill(!state_snapshot.manual_fill_active,
+                        "Touch key", &manual_fill_active, &message);
+
+                    if (request_err == ESP_OK) {
+                        ESP_LOGI(TAG, "Touch key action: %s (manual_fill_active=%d)",
+                                 message ? message : "OK", manual_fill_active);
                     } else {
-                        // Einfacher Press: Zuerst WiFi aufwecken, dann manuelles Befüllen umschalten
-                        system_state_t state_snapshot;
-                        get_system_state_snapshot(&state_snapshot);
-
-                        if (state_snapshot.wifi_sleep_active) {
-                            // WiFi aus Sleep wecken
-                            ESP_LOGI(TAG, "🌅 Touch key: Einfacher Press - WiFi aufwecken");
-                            esp_wifi_start();
-                            xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-                            sys_state.wifi_sleep_active = false;
-                            sys_state.wifi_sleep_hysteresis_start_ms = 0;
-                            xSemaphoreGive(sys_state_mutex);
-                        } else {
-                            // Manuelles Befüllen umschalten
-                            bool manual_fill_active = false;
-                            const char *message = NULL;
-
-                            esp_err_t request_err = request_manual_fill(!state_snapshot.manual_fill_active,
-                                "Touch key", &manual_fill_active, &message);
-
-                            if (request_err == ESP_OK) {
-                                ESP_LOGI(TAG, "Touch key action: %s (manual_fill_active=%d)",
-                                         message ? message : "OK", manual_fill_active);
-                            } else {
-                                ESP_LOGW(TAG, "Touch key ignored: %s",
-                                         message ? message : esp_err_to_name(request_err));
-                            }
-                        }
-                        press_count = 0;
+                        ESP_LOGW(TAG, "Touch key ignored: %s",
+                                 message ? message : esp_err_to_name(request_err));
                     }
                 }
             }
@@ -1243,7 +1396,9 @@ static bool parse_json_string_field(const char *json, const char *key, char *out
         start++;
     }
 
-    return true;
+    // Kein schliessendes Anfuehrungszeichen gefunden -> abgeschnittener Body,
+    // darf nicht als gueltiger Wert durchgehen (frueher stand hier "return true").
+    return false;
 }
 
 static int calculate_fill_percent(uint16_t sensor_distance_cm, uint32_t threshold_top, uint32_t threshold_bottom)
@@ -1291,15 +1446,31 @@ static void trigger_emergency_stop(const char *reason)
     }
 
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 1);
+    if (reason != NULL) {
+        nvs_set_str(sys_state.nvs_handle, NVS_KEY_EMERGENCY_REASON, reason);
+    }
     persist_runtime_counters_locked();
     xSemaphoreGive(sys_state_mutex);
+
+    // Sicherheit: Ventil sofort schliessen - unabhaengig davon, wer den Notaus
+    // ausloest. Ausserhalb des Mutex, weil die Zustandsfunktionen selbst sperren.
+    // Die Ventilsitzung beendet der valve_task beim naechsten Durchlauf
+    // ("session finalized after external stop").
+    gpio_set_level(GPIO_VALVE_CONTROL, 0);
+    xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    sys_state.valve_state = false;
+    sys_state.manual_fill_active = false;
+    xSemaphoreGive(sys_state_mutex);
+    ESP_LOGW(TAG, "🚨 NOTAUS - Ventil geschlossen (%s)", reason != NULL ? reason : "ohne Angabe");
 }
 
 static void reset_emergency_stop(void)
 {
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
     sys_state.emergency_stop_active = false;
-    strcpy(sys_state.emergency_stop_reason, "");
+    // Grund absichtlich stehen lassen: er bleibt als "letzter Notaus-Grund" in
+    // der Oberflaeche sichtbar. Sonst ist nach dem Zuruecksetzen nicht mehr
+    // nachvollziehbar, warum der Notaus kam (Fehlererfahrung 2026-09-27).
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 0);
     nvs_commit(sys_state.nvs_handle);
     xSemaphoreGive(sys_state_mutex);
@@ -1322,10 +1493,61 @@ static void finalize_active_valve_session(uint64_t now_ms)
 }
 
 /**
+ * @brief Prueft den Authorization-Header (HTTP Basic).
+ *
+ * Der Benutzername ist beliebig, nur das Passwort zaehlt.
+ */
+static bool api_authorized(httpd_req_t *req)
+{
+#if !API_AUTH_ENABLED
+    return true;
+#else
+    char header[96] = {0};
+    size_t len = httpd_req_get_hdr_value_len(req, "Authorization");
+    if (len == 0 || len >= sizeof(header)) {
+        return false;
+    }
+    if (httpd_req_get_hdr_value_str(req, "Authorization", header, sizeof(header)) != ESP_OK) {
+        return false;
+    }
+    if (strncmp(header, "Basic ", 6) != 0) {
+        return false;
+    }
+
+    unsigned char decoded[80] = {0};
+    size_t decoded_len = 0;
+    if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len,
+                              (const unsigned char *)(header + 6),
+                              strlen(header + 6)) != 0) {
+        return false;
+    }
+    decoded[decoded_len] = '\0';
+
+    const char *colon = strchr((const char *)decoded, ':');
+    const char *given = (colon != NULL) ? (colon + 1) : (const char *)decoded;
+    return (api_password[0] != '\0') && (strcmp(given, api_password) == 0);
+#endif
+}
+
+/**
+ * @brief Antwortet mit 401, wenn die Zugangsdaten fehlen oder falsch sind.
+ */
+static esp_err_t api_require_auth(httpd_req_t *req)
+{
+    if (api_authorized(req)) {
+        return ESP_OK;
+    }
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"" API_AUTH_REALM "\"");
+    httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Login erforderlich");
+    return ESP_FAIL;
+}
+
+/**
  * @brief Handler: GET /api/status - Return system status as JSON
  */
 static esp_err_t status_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char json_response[2600];
     char escaped_emergency_reason[(sizeof(sys_state.emergency_stop_reason) * 2) + 1] = {0};
     char escaped_stack_warning_message[(sizeof(sys_state.stack_warning_message) * 2) + 1] = {0};
@@ -1395,6 +1617,15 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"total_open_time_ms\":%llu,"
         "\"total_liters\":%.2f"
         "},"
+        "\"touch\":{"
+        "\"press_count\":%lu,"
+        "\"last_presses\":%u,"
+        "\"baseline\":%u,"
+        "\"value\":%u,"
+        "\"min_value\":%u,"
+        "\"max_dip\":%u,"
+        "\"enabled\":%s"
+        "},"
         "\"system\":{"
         "\"free_heap_bytes\":%d,"
         "\"uptime_ms\":%lld,"
@@ -1407,6 +1638,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"cpu_top_task\":\"%s\","
         "\"cpu_top_task_percent\":%lu,"
         "\"cpu_task_count\":%lu,"
+        "\"reset_reason\":%d,"
         "\"build_number\":%d,"
         "\"api_version\":\"%s\""
         "}"
@@ -1433,6 +1665,13 @@ static esp_err_t status_handler(httpd_req_t *req)
         (unsigned long)state_snapshot.emergency_trigger_count,
         (unsigned long long)state_snapshot.total_open_time_ms,
         state_snapshot.total_liters,
+        (unsigned long)touch_press_count,
+        (unsigned int)touch_last_presses,
+        (unsigned int)touch_key_baseline,
+        (unsigned int)touch_last_value,
+        (unsigned int)touch_min_value,
+        (unsigned int)touch_max_dip,
+        touch_key_enabled ? "true" : "false",
         free_mem,
         uptime_ms,
         wifi_snapshot.is_connected ? "true" : "false",
@@ -1444,6 +1683,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         escaped_cpu_top_task,
         (unsigned long)cpu_top_task_percent,
         (unsigned long)cpu_task_count,
+        (int)esp_reset_reason(),
         BUILD_NUMBER,
         API_VERSION
     );
@@ -1461,6 +1701,7 @@ static esp_err_t status_handler(httpd_req_t *req)
  */
 static esp_err_t config_get_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char json_response[512];
     system_state_t state_snapshot;
     
@@ -1500,7 +1741,8 @@ static esp_err_t config_get_handler(httpd_req_t *req)
  */
 static esp_err_t config_post_handler(httpd_req_t *req)
 {
-    char buf[256] = {0};
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
+    char buf[512] = {0};
     esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
 
     if (recv_err != ESP_OK) {
@@ -1526,8 +1768,10 @@ static esp_err_t config_post_handler(httpd_req_t *req)
     if (has_top && has_bottom && has_timeout && has_fill_progress_timeout && has_flow_rate &&
         top >= 0 && bottom >= 0 && timeout >= 0 && fill_progress_timeout >= 0 && flow_rate >= 0.0f) {
 
-        if (top > 0 && top <= 30 && bottom > top && bottom <= 50 && timeout >= 1000 && fill_progress_timeout >= 1000 && flow_rate > 0.0f && flow_rate <= 50.0f &&
-            (!has_25cm_stop || (manual_fill_25cm_stop_threshold >= 1 && manual_fill_25cm_stop_threshold <= 30)) &&
+        // Hardware-Vorgabe: nur unter ca. 18 cm misst der Sensor zuverlaessig,
+        // 25 cm ist sein Festwert fuer "keine Messung" -> Grenzen 1..17 cm.
+        if (top > 0 && top <= 17 && bottom > top && bottom <= 17 && timeout >= 1000 && fill_progress_timeout >= 1000 && flow_rate > 0.0f && flow_rate <= 50.0f &&
+            (!has_25cm_stop || (manual_fill_25cm_stop_threshold >= 1 && manual_fill_25cm_stop_threshold <= 17)) &&
             (!has_25cm_timeout || manual_fill_25cm_monitor_timeout >= 1000) &&
             (!has_wifi_sleep_start || (wifi_sleep_start_hour >= 0 && wifi_sleep_start_hour <= 23)) &&
             (!has_wifi_sleep_end || (wifi_sleep_end_hour >= 0 && wifi_sleep_end_hour <= 23)) &&
@@ -1569,6 +1813,7 @@ static esp_err_t config_post_handler(httpd_req_t *req)
  */
 static esp_err_t valve_manual_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char buf[128] = {0};
     esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
 
@@ -1614,13 +1859,22 @@ static esp_err_t valve_manual_handler(httpd_req_t *req)
  */
 static esp_err_t emergency_stop_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char buf[64] = {0};
     esp_err_t recv_err = receive_request_body(req, buf, sizeof(buf));
     system_state_t state_snapshot;
-    bool do_reset = true;
+    bool do_reset = false;
 
+    // Nur ein ausdrueckliches "reset" loescht den Notaus, "trigger" setzt ihn.
+    // Alles andere (leerer oder abgeschnittener Body) wird abgelehnt - frueher
+    // loeschte jeder unbekannte Body den Notaus.
     if (recv_err == ESP_OK && strstr(buf, "\"action\":\"trigger\"")) {
         do_reset = false;
+    } else if (recv_err == ESP_OK && strstr(buf, "\"action\":\"reset\"")) {
+        do_reset = true;
+    } else {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Expected action reset or trigger");
+        return ESP_FAIL;
     }
 
     get_system_state_snapshot(&state_snapshot);
@@ -1665,6 +1919,7 @@ static esp_err_t emergency_stop_handler(httpd_req_t *req)
  */
 static esp_err_t valve_stop_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
     sys_state.user_fill_halt = true;
     xSemaphoreGive(sys_state_mutex);
@@ -1685,6 +1940,7 @@ static esp_err_t valve_stop_handler(httpd_req_t *req)
  */
 static esp_err_t counters_reset_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     system_state_t state_snapshot;
     get_system_state_snapshot(&state_snapshot);
 
@@ -1705,6 +1961,7 @@ static esp_err_t counters_reset_handler(httpd_req_t *req)
  */
 static esp_err_t warnings_reset_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     bool cleared = clear_runtime_warnings();
 
     send_json_response(req,
@@ -1719,6 +1976,7 @@ static esp_err_t warnings_reset_handler(httpd_req_t *req)
  */
 static esp_err_t ota_status_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     ota_state_t snapshot;
     char escaped_phase[(sizeof(snapshot.phase) * 2) + 1] = {0};
     char escaped_message[(sizeof(snapshot.message) * 2) + 1] = {0};
@@ -1766,6 +2024,7 @@ static esp_err_t ota_status_handler(httpd_req_t *req)
  */
 static esp_err_t ota_rollback_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
     
     if (err == ESP_OK) {
@@ -1788,6 +2047,7 @@ static esp_err_t ota_rollback_handler(httpd_req_t *req)
  */
 static esp_err_t ota_start_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     char body[320] = {0};
     char url[192] = {0};
     ota_state_t snapshot;
@@ -1852,6 +2112,7 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
         free(task_url);
         xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
         ota_state.in_progress = false;
+        ota_state.last_result_ok = false;
         strncpy(ota_state.phase, "FAILED", sizeof(ota_state.phase) - 1);
         strncpy(ota_state.message, "OTA Task konnte nicht gestartet werden", sizeof(ota_state.message) - 1);
         strncpy(ota_state.last_error, "task-create-failed", sizeof(ota_state.last_error) - 1);
@@ -1873,6 +2134,7 @@ static esp_err_t ota_start_handler(httpd_req_t *req)
  */
 static esp_err_t system_reset_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Reset waehrend OTA verhindern
     ota_state_t ota_snapshot;
     get_ota_state_snapshot(&ota_snapshot);
@@ -1895,6 +2157,10 @@ static esp_err_t system_reset_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_send(req, response, strlen(response));
     
+    // Antwort erst rausschicken lassen, dann neu starten (sonst meldet die
+    // Oberflaeche "Fehler", obwohl der Neustart klappt).
+    vTaskDelay(pdMS_TO_TICKS(200));
+
     // Restart after response sent
     esp_restart();
     return ESP_OK;
@@ -2067,6 +2333,13 @@ static void ota_health_check_task(void *pvParameters)
             
             if (system_healthy) {
                 // System ist gesund - Health-Check bestanden
+
+                // Rollback abschalten: erst jetzt gilt die neue Firmware als gueltig.
+                // Ohne diesen Aufruf wuerde der Bootloader beim naechsten Neustart
+                // von selbst zur alten Version zurueckrollen.
+                if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
+                    ESP_LOGI(TAG, "✅ Neue Firmware als gueltig markiert (Rollback deaktiviert)");
+                }
                 xSemaphoreTake(ota_state_mutex, portMAX_DELAY);
                 ota_state.health_check_passed = true;
                 xSemaphoreGive(ota_state_mutex);
@@ -2094,6 +2367,7 @@ static void ota_health_check_task(void *pvParameters)
  */
 static esp_err_t wifi_status_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Get current WiFi mode and status
     wifi_ap_record_t ap_info;
     char response[512];
@@ -2144,6 +2418,7 @@ static esp_err_t wifi_status_handler(httpd_req_t *req)
  */
 static esp_err_t wifi_config_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Read content length
     size_t content_len = req->content_len;
     if (content_len > 1024) {
@@ -2354,6 +2629,7 @@ static void dns_server_task(void *pvParameters)
  */
 static esp_err_t index_handler(httpd_req_t *req)
 {
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
     // Lightweight HTML UI - no emojis, minimal size for reliable transfer
     static const char index_html[] = R"html(<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2678,24 +2954,15 @@ function loadSettings(){
     });
 }
 function saveSettings(){
-    const topEl = document.getElementById('top');
-    const bottomEl = document.getElementById('bottom');
-    const timeoutEl = document.getElementById('timeout');
-    const fillProgressTimeoutEl = document.getElementById('fill-progress-timeout');
-    const flowRateEl = document.getElementById('flow-rate');
-    const stop25cmEl = document.getElementById('25cm-stop');
-    const timeout25cmEl = document.getElementById('25cm-timeout');
-    const wifiSleepStartEl = document.getElementById('wifi-sleep-start');
-    const wifiSleepEndEl = document.getElementById('wifi-sleep-end');
-    const top = topEl ? parseInt(topEl.value) : null;
-    const bottom = bottomEl ? parseInt(bottomEl.value) : null;
-    const timeout = timeoutEl ? parseInt(timeoutEl.value) : null;
-    const fillProgressTimeout = fillProgressTimeoutEl ? parseInt(fillProgressTimeoutEl.value) : null;
-    const flowRate = flowRateEl ? parseFloat(flowRateEl.value) : null;
-    const stop25cm = stop25cmEl ? parseInt(stop25cmEl.value) : null;
-    const timeout25cm = timeout25cmEl ? parseInt(timeout25cmEl.value) : null;
-    const wifiSleepStart = wifiSleepStartEl ? parseInt(wifiSleepStartEl.value) : null;
-    const wifiSleepEnd = wifiSleepEndEl ? parseInt(wifiSleepEndEl.value) : null;
+    const top = parseInt(document.getElementById('top').value, 10);
+    const bottom = parseInt(document.getElementById('bottom').value, 10);
+    const timeout = parseInt(document.getElementById('timeout').value, 10);
+    const fillProgressTimeout = parseInt(document.getElementById('fill-progress-timeout').value, 10);
+    const flowRate = parseFloat(document.getElementById('flow-rate').value);
+    const stop25cm = parseInt(document.getElementById('25cm-stop').value, 10);
+    const timeout25cm = parseInt(document.getElementById('25cm-timeout').value, 10);
+    const wifiSleepStart = parseInt(document.getElementById('wifi-sleep-start').value, 10);
+    const wifiSleepEnd = parseInt(document.getElementById('wifi-sleep-end').value, 10);
     if(top === null || bottom === null || timeout === null || fillProgressTimeout === null || flowRate === null){
         showMsg('settings', 'Bitte alle Pflichtfelder ausfuellen', true);
         return;
@@ -2979,9 +3246,23 @@ function updateDashboard(force){
     if(cpuTopTaskEl) cpuTopTaskEl.textContent = system.cpu_top_task ? system.cpu_top_task : '-';
     if(cpuTopTaskPctEl) cpuTopTaskPctEl.textContent = Number(system.cpu_top_task_percent || 0).toFixed(0) + ' %';
     if(cpuTaskCountEl) cpuTaskCountEl.textContent = Number(system.cpu_task_count || 0).toFixed(0);
-    if (d.emergency_reason) {
-        reasonEl.textContent = 'Grund: ' + d.emergency_reason;
+    // Notaus-Anzeige: rot nur bei aktivem Notaus. Ist alles in Ordnung, bleibt
+    // der letzte Grund als neutraler Hinweis stehen (grau) oder verschwindet.
+    if (d.emergency && d.emergency_reason) {
+        reasonEl.textContent = 'Notaus-Grund: ' + d.emergency_reason;
         reasonEl.style.display = 'block';
+        reasonEl.style.background = '#ffebee';
+        reasonEl.style.color = '#b71c1c';
+    } else if (d.emergency) {
+        reasonEl.textContent = 'Notaus aktiv (kein Grund hinterlegt)';
+        reasonEl.style.display = 'block';
+        reasonEl.style.background = '#ffebee';
+        reasonEl.style.color = '#b71c1c';
+    } else if (d.emergency_reason) {
+        reasonEl.textContent = 'Letzter Notaus-Grund: ' + d.emergency_reason;
+        reasonEl.style.display = 'block';
+        reasonEl.style.background = '#f3f4f6';
+        reasonEl.style.color = '#374151';
     } else {
         reasonEl.style.display = 'none';
     }
@@ -3024,8 +3305,18 @@ function fill(){
 function stop(){fetch('/api/valve/stop', {method: 'POST'}).then(() => {isFilling = false; updateDashboard(true); showMsg('dashboard', 'Ventil geschlossen', false);});}
 function resetSensor(){if(!confirm('Sensor-Neuinitialisierung durch System-Neustart?')) return; fetch('/api/system/reset', {method: 'POST'}).then(() => showMsg('dashboard', 'Neustart...', false)).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
 function resetEmergency(){if(!isEmergencyActive){if(resetHoldTriggered) return; const now = Date.now(); const isDoubleTap = (now - lastResetTapMs) <= 450; lastResetTapMs = now; if(isDoubleTap){resetSensor(); return;} if(hasStickyWarning){resetWarnings(); return;} showMsg('dashboard', 'Doppeltipp: Sensor-Reinit | 3 Sekunden halten: Zaehler-Reset', false); return;} fetch('/api/emergency_stop', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'reset'})}).then(r => r.json()).then(d => {updateDashboard(true); document.getElementById('emergency-reason').style.display = 'none'; showMsg('dashboard', d.message || 'Reset ausgefuehrt', false);}).catch(() => showMsg('dashboard', 'Reset fehlgeschlagen', true));}
-function loadSettings(){fetch('/api/config').then(r => r.json()).then(d => {document.getElementById('top').value = d.config.threshold_top_cm; document.getElementById('bottom').value = d.config.threshold_bottom_cm; document.getElementById('timeout').value = d.config.timeout_max_ms; document.getElementById('fill-progress-timeout').value = d.config.fill_progress_timeout_ms; document.getElementById('flow-rate').value = d.config.flow_rate_l_per_min; document.getElementById('25cm-stop').value = d.config.manual_fill_25cm_stop_threshold_cm; document.getElementById('25cm-timeout').value = d.config.manual_fill_25cm_monitor_timeout_ms;});}
-function saveSettings(){const top = parseInt(document.getElementById('top').value, 10); const bottom = parseInt(document.getElementById('bottom').value, 10); const timeout = parseInt(document.getElementById('timeout').value, 10); const fillProgressTimeout = parseInt(document.getElementById('fill-progress-timeout').value, 10); const flowRate = parseFloat(document.getElementById('flow-rate').value); const cm25Stop = parseInt(document.getElementById('25cm-stop').value, 10); const cm25Timeout = parseInt(document.getElementById('25cm-timeout').value, 10); if(!Number.isFinite(top) || !Number.isFinite(bottom) || !Number.isFinite(timeout) || !Number.isFinite(fillProgressTimeout) || !Number.isFinite(flowRate) || !Number.isFinite(cm25Stop) || !Number.isFinite(cm25Timeout)){showMsg('settings', 'Alle Felder muessen gueltige Zahlen enthalten', true); return;} if(top < 1 || top > 100 || bottom < 1 || bottom > 100){showMsg('settings', 'OBEN und UNTEN muessen zwischen 1 und 100 cm liegen', true); return;} if(top >= bottom){showMsg('settings', 'OBEN muss kleiner als UNTEN sein', true); return;} if(timeout < 1000 || fillProgressTimeout < 1000 || cm25Timeout < 1000){showMsg('settings', 'Timeout-Werte muessen mindestens 1000 ms sein', true); return;} if(flowRate <= 0 || flowRate > 50){showMsg('settings', 'Durchfluss muss zwischen 0.1 und 50 L/min liegen', true); return;} if(cm25Stop < 1 || cm25Stop > 30){showMsg('settings', '25cm Stop-Schwellenwert muss zwischen 1 und 30 cm liegen', true); return;} const cfg = {threshold_top_cm: top, threshold_bottom_cm: bottom, timeout_max_ms: timeout, fill_progress_timeout_ms: fillProgressTimeout, flow_rate_l_per_min: flowRate, manual_fill_25cm_stop_threshold_cm: cm25Stop, manual_fill_25cm_monitor_timeout_ms: cm25Timeout}; settingsSaveInFlight = true; syncSaveButton(); fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg)}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: ' + r.status)); return r.json();}).then(() => {showMsg('settings', 'Einstellungen gespeichert', false); updateDashboard(true);}).catch(e => showMsg('settings', 'Fehler: ' + e.message, true)).finally(() => {settingsSaveInFlight = false; syncSaveButton();});}
+function loadSettings(){fetch('/api/config').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {document.getElementById('top').value = d.config.threshold_top_cm; document.getElementById('bottom').value = d.config.threshold_bottom_cm; document.getElementById('timeout').value = d.config.timeout_max_ms; document.getElementById('fill-progress-timeout').value = d.config.fill_progress_timeout_ms; document.getElementById('flow-rate').value = d.config.flow_rate_l_per_min; document.getElementById('25cm-stop').value = d.config.manual_fill_25cm_stop_threshold_cm; document.getElementById('25cm-timeout').value = d.config.manual_fill_25cm_monitor_timeout_ms; document.getElementById('wifi-sleep-start').value = d.config.wifi_sleep_start_hour; document.getElementById('wifi-sleep-end').value = d.config.wifi_sleep_end_hour;}).catch(e => {console.error('loadSettings failed:', e); showMsg('settings', 'Konfiguration konnte nicht geladen werden', true);});}
+function saveSettings(){const top = parseInt(document.getElementById('top').value, 10); const wifiSleepStart = parseInt(document.getElementById('wifi-sleep-start').value, 10); const wifiSleepEnd = parseInt(document.getElementById('wifi-sleep-end').value, 10); const bottom = parseInt(document.getElementById('bottom').value, 10); const timeout = parseInt(document.getElementById('timeout').value, 10); const fillProgressTimeout = parseInt(document.getElementById('fill-progress-timeout').value, 10); const flowRate = parseFloat(document.getElementById('flow-rate').value); const cm25Stop = parseInt(document.getElementById('25cm-stop').value, 10); const timeout25cm = parseInt(document.getElementById('25cm-timeout').value, 10); if(!Number.isFinite(top) || !Number.isFinite(bottom) || !Number.isFinite(timeout) || !Number.isFinite(fillProgressTimeout) || !Number.isFinite(flowRate) || !Number.isFinite(cm25Stop) || !Number.isFinite(timeout25cm)){showMsg('settings', 'Alle Felder muessen gueltige Zahlen enthalten', true); return;} if(top < 1 || top > 17 || bottom < 1 || bottom > 17){showMsg('settings', 'OBEN und UNTEN muessen zwischen 1 und 17 cm liegen (Sensor misst nur unter 18 cm)', true); return;} if(top >= bottom){showMsg('settings', 'OBEN muss kleiner als UNTEN sein', true); return;} if(timeout < 1000 || fillProgressTimeout < 1000 || timeout25cm < 1000){showMsg('settings', 'Timeout-Werte muessen mindestens 1000 ms sein', true); return;} if(flowRate <= 0 || flowRate > 50){showMsg('settings', 'Durchfluss muss zwischen 0.1 und 50 L/min liegen', true); return;} if(cm25Stop < 1 || cm25Stop > 17){showMsg('settings', '25cm Stop-Schwellenwert muss zwischen 1 und 17 cm liegen (Sensor misst nur unter 18 cm)', true); return;} const cfg = {threshold_top_cm: top, threshold_bottom_cm: bottom, timeout_max_ms: timeout, fill_progress_timeout_ms: fillProgressTimeout, flow_rate_l_per_min: flowRate, manual_fill_25cm_stop_threshold_cm: cm25Stop, manual_fill_25cm_monitor_timeout_ms: timeout25cm, wifi_sleep_start_hour: (Number.isFinite(wifiSleepStart) ? wifiSleepStart : undefined), wifi_sleep_end_hour: (Number.isFinite(wifiSleepEnd) ? wifiSleepEnd : undefined)};
+    settingsSaveInFlight = true;
+    syncSaveButton();
+    fetch('/api/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(cfg)}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: ' + r.status));
+        return r.json();
+    }).then(() => {showMsg('settings', 'Einstellungen gespeichert', false);
+        updateDashboard(true);
+    }).catch(e => showMsg('settings', 'Fehler: ' + e.message, true));
+    settingsSaveInFlight = false;
+    syncSaveButton();
+}
 function loadWiFi(){fetch('/api/wifi/status').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {const c=d.wifi&&d.wifi.connected; document.getElementById('wifi-con').textContent=c?'Verbunden':'Getrennt'; document.getElementById('wifi-con').style.color=c?'#4caf50':'#f44336'; document.getElementById('wifi-ssid').textContent = (d.wifi && d.wifi.ssid) ? d.wifi.ssid : '-'; document.getElementById('wifi-rssi').textContent = (d.wifi && d.wifi.rssi) ? (d.wifi.rssi + ' dBm') : '-'; document.getElementById('wifi-ip').textContent = (d.wifi && d.wifi.ip) ? d.wifi.ip : '-';}).catch(e => {console.error('loadWiFi failed:', e); document.getElementById('wifi-con').textContent='Fehler'; showMsg('wifi', 'WiFi API Fehler', true);});}
 function connectWiFi(){const s = document.getElementById('new-ssid').value; const p = document.getElementById('new-pass').value; if(!s||!p) {showMsg('wifi', 'SSID und Pass erforderlich', true); return;} fetch('/api/wifi/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ssid: s, password: p})}).then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {showMsg('wifi', 'WiFi Update gesendet', false); document.getElementById('new-ssid').value = ''; document.getElementById('new-pass').value = ''; setTimeout(loadWiFi, 2000);}).catch(e => {console.error('connectWiFi failed:', e); showMsg('wifi', 'Fehler: '+e.message, true);});}
 function reset(){if(confirm('System wirklich neustarten?')) fetch('/api/system/reset', {method: 'POST'}).then(() => showMsg('wifi', 'Neustart...', false)).catch(e => showMsg('wifi', 'Fehler', true));}
@@ -3454,7 +3745,7 @@ static void sensor_task(void *pvParameters)
                 system_state_t state_snapshot;
                 get_system_state_snapshot(&state_snapshot);
                 if (!state_snapshot.emergency_stop_active) {
-                    trigger_emergency_stop("Sensor reading too high (>30cm), possible sensor failure");
+                    trigger_emergency_stop("Sensor reading implausible (>300 cm), possible sensor failure");
                     get_system_state_snapshot(&state_snapshot);
                     ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", state_snapshot.emergency_stop_reason);
                 }
@@ -3598,6 +3889,26 @@ static void valve_task(void *pvParameters)
             state_snapshot.manual_fill_active = false;
         }
 
+        // Diagnose: Statuszeile nur bei Aenderung oder alle 60 s (sonst zu viel Log)
+        {
+            static uint64_t last_heartbeat_ms = 0;
+            static int last_state = -1, last_filling = -1, last_req = -1, last_valve = -1;
+            int cur_req = state_snapshot.manual_fill_active ? 1 : 0;
+            int cur_valve = state_snapshot.valve_state ? 1 : 0;
+            bool changed = (current_tank_state != last_state) || ((int)filling != last_filling) ||
+                           (cur_req != last_req) || (cur_valve != last_valve);
+            if (changed || (now_ms - last_heartbeat_ms) >= 60000) {
+                last_heartbeat_ms = now_ms;
+                last_state = current_tank_state;
+                last_filling = filling;
+                last_req = cur_req;
+                last_valve = cur_valve;
+                ESP_LOGI(TAG, "[HB] state=%d dist=%u filling=%d manual_mode=%d req=%d valve=%d emerg=%d",
+                         current_tank_state, state_snapshot.sensor_distance_cm, filling, manual_mode,
+                         cur_req, cur_valve, state_snapshot.emergency_stop_active);
+            }
+        }
+
         if (filling && !state_snapshot.valve_state) {
             finalize_active_valve_session(now_ms);
             RESET_FILL_PROGRESS_VARS();
@@ -3625,6 +3936,11 @@ static void valve_task(void *pvParameters)
             fill_start_time_ms = now_ms;
             last_progress_time_ms = fill_start_time_ms;
             last_no_progress_log_ms = fill_start_time_ms;
+            // WICHTIG: hier true uebergeben! begin_valve_session setzt
+            // sys_state.manual_fill_active auf diesen Wert. Mit false (wie beim
+            // automatischen Befuellen) wird die Anforderung sofort geloescht und
+            // der Task schliesst das Ventil im naechsten Durchlauf wieder
+            // ("Valve CLOSED - manual fill stopped"). Fehler bis 2026-09-27.
             begin_valve_session(fill_start_time_ms, true);
             progress_reference_distance = state_snapshot.sensor_distance_cm;
             progress_candidate_distance = state_snapshot.sensor_distance_cm;
@@ -3672,7 +3988,7 @@ static void valve_task(void *pvParameters)
             last_tank_state = current_tank_state;
         }
 
-        if (current_tank_state == 3 && !filling && !state_snapshot.emergency_stop_active && !state_snapshot.manual_fill_active && !state_snapshot.user_fill_halt && state_snapshot.sensor_distance_cm < 25 && !in_cooldown) {
+        if (current_tank_state == 3 && !filling && !state_snapshot.emergency_stop_active && !state_snapshot.user_fill_halt && state_snapshot.sensor_distance_cm < 25 && !in_cooldown) {
             gpio_set_level(GPIO_VALVE_CONTROL, 1);  // Open valve
             filling = true;
             manual_mode = false;
@@ -3780,7 +4096,12 @@ static void valve_task(void *pvParameters)
                     progress_candidate_distance = current_distance;
                 }
 
-                if ((now_ms - last_progress_time_ms) > state_snapshot.fill_progress_timeout_ms) {
+                // Kein Fortschritt ist beim manuellen Befuellen im nicht messbaren
+                // Bereich (Sensor meldet 25 cm) normal - dort greift die
+                // 25-cm-Ueberwachung mit Stop-Schwelle und Monitor-Timeout.
+                // Ohne diese Bedingung loeste jedes manuelle Befuellen dort nach
+                // dem Fortschritts-Timeout einen Notaus aus (Fehler bis 2026-09-27).
+                if (manual_fill_25cm_start_ms == 0 && (now_ms - last_progress_time_ms) > state_snapshot.fill_progress_timeout_ms) {
                     gpio_set_level(GPIO_VALVE_CONTROL, 0);
                     set_valve_and_manual_state(false, false);
                     trigger_emergency_stop(manual_mode
@@ -3788,7 +4109,10 @@ static void valve_task(void *pvParameters)
                         : "No fill progress: distance did not decrease sufficiently within timeout");
                     finalize_active_valve_session(now_ms);
                     RESET_FILL_PROGRESS_VARS();
-                    ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", sys_state.emergency_stop_reason);
+                    // Grund frisch und mit Mutex lesen (direkter Zugriff war ein Datenrennen)
+                    system_state_t emergency_snapshot;
+                    get_system_state_snapshot(&emergency_snapshot);
+                    ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", emergency_snapshot.emergency_stop_reason);
                     last_tank_state = current_tank_state;
                     vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
                     continue;
@@ -3824,13 +4148,21 @@ static void valve_task(void *pvParameters)
         // LED feedback: ON while opening, OFF when closed
         // Langsames Blinken bei WiFi-Sleep-Mode oder Notaus
         get_system_state_snapshot(&state_snapshot);
+#if LED_TEST_PATTERN
+        // TEST (2026-09-27): GPIO 2 blinkt 10 s lang zweimal pro Sekunde, dann
+        // 10 s Pause - wiederholt. Damit ist eindeutig sichtbar, ob an GPIO 2
+        // eine LED haengt (dann blinkt sie) oder nicht (dann bleibt alles still).
+        set_status_led(((now_ms % 20000) < 10000) && (((now_ms / 250) % 2) == 0));
+#else
         if (state_snapshot.emergency_stop_active || state_snapshot.wifi_sleep_active) {
             // Langsames Blinken (1 Sekunde an, 1 Sekunde aus)
             uint64_t blink_cycle = (now_ms / 1000) % 2;
-            gpio_set_level(GPIO_LED_STATUS, blink_cycle ? 1 : 0);
+            set_status_led(blink_cycle != 0);
         } else {
-            gpio_set_level(GPIO_LED_STATUS, state_snapshot.valve_state ? 1 : 0);
+            // Kopplung: LED an, solange das Ventil offen ist
+            set_status_led(state_snapshot.valve_state);
         }
+#endif
         
         vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
     }
@@ -3876,10 +4208,45 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 // ============================================================================
 
 /**
+ * @brief Zeitquelle starten (SNTP), sobald WLAN verbunden ist.
+ *
+ * Ohne gueltige Uhrzeit darf der WiFi-Schlafmodus nicht arbeiten - sonst
+ * haelt er das Zeitfenster 19-05 fuer dauerhaft aktiv (Zeit waere 1970).
+ */
+static void start_sntp_once(void)
+{
+    static bool sntp_started = false;
+    if (sntp_started) {
+        return;
+    }
+
+    setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);   // Europe/Berlin
+    tzset();
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    sntp_started = true;
+    ESP_LOGI(TAG, "🕒 SNTP gestartet (Europe/Berlin, pool.ntp.org)");
+}
+
+/**
+ * @brief Ist die Systemzeit gestellt? (Vor 2024 = ungueltig, also 1970)
+ */
+static bool system_time_valid(void)
+{
+    return time(NULL) > 1704067200;   // 2024-01-01 00:00 UTC
+}
+
+/**
  * @brief Prüft, ob die aktuelle Uhrzeit im WiFi-Sleep-Zeitfenster liegt
  */
 static bool is_in_wifi_sleep_window(void)
 {
+    // Ohne gestellte Uhr ist keine Aussage moeglich -> niemals schlafen
+    if (!system_time_valid()) {
+        return false;
+    }
+
     system_state_t state_snapshot;
     get_system_state_snapshot(&state_snapshot);
 
@@ -3922,6 +4289,8 @@ static void wifi_task(void *pvParameters)
         
         // If already connected, just monitor
         if (wifi_snapshot.is_connected) {
+            start_sntp_once();   // Zeitquelle fuer den WiFi-Schlafmodus
+
             if (wifi_snapshot.ap_active) {
                 set_fallback_ap_enabled(false);
             }
@@ -3955,7 +4324,9 @@ static void wifi_task(void *pvParameters)
                 }
             } else {
                 // Außerhalb des Zeitfensters: WiFi aktivieren
-                if (sys_state.wifi_sleep_active) {
+                system_state_t sleep_snapshot;
+                get_system_state_snapshot(&sleep_snapshot);
+                if (sleep_snapshot.wifi_sleep_active) {
                     ESP_LOGI(TAG, "🌅 WiFi-Sleep-Mode: Aktiviere WiFi (außerhalb Zeitfenster)");
                     esp_wifi_start();
                     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
@@ -4272,7 +4643,7 @@ void app_main(void)
     ret = init_touch_key();
     ESP_LOGI(TAG, "     Touch key result: %s (0x%X)", esp_err_to_name(ret), ret);
     if (ret != ESP_OK && ret != ESP_ERR_NOT_SUPPORTED) {
-        ESP_LOGW(TAG, "⚠️ Touch key unavailable - continuing without hardware touch trigger");
+        ESP_LOGW(TAG, "⚠️  Touch key unavailable - continuing without hardware touch trigger");
     }
     
     ESP_LOGI(TAG, "✅ Hardware initialized successfully");
@@ -4486,13 +4857,17 @@ void app_main(void)
     }
     
     ESP_LOGI(TAG, "✅ All tasks created and running");
+    system_state_t boot_snapshot;
+    get_system_state_snapshot(&boot_snapshot);
     ESP_LOGI(TAG, "📡 Configured thresholds:");
-    ESP_LOGI(TAG, "   - OBEN (Tank FULL):  %d cm ← Valve closes when reached", sys_state.threshold_top);
-    ESP_LOGI(TAG, "   - UNTEN (Tank EMPTY): %d cm ← Valve opens when reached", sys_state.threshold_bottom);
-    ESP_LOGI(TAG, "   - Timeout (max fill): %d ms ← Safety cutoff after this duration", sys_state.timeout_max);
-    
-    // LED indicates system ready
-    gpio_set_level(GPIO_LED_STATUS, 0);  // LED off (ready)
+    ESP_LOGI(TAG, "   - OBEN (Tank FULL):  %d cm ← Valve closes when reached", boot_snapshot.threshold_top);
+    ESP_LOGI(TAG, "   - UNTEN (Tank EMPTY): %d cm ← Valve opens when reached", boot_snapshot.threshold_bottom);
+    ESP_LOGI(TAG, "   - Timeout (max fill): %d ms ← Safety cutoff after this duration", boot_snapshot.timeout_max);
+    // LED zeigt den Ventilzustand (aus, solange das Ventil geschlossen ist)
+    set_status_led(false);
+    // Kontrolle: Pegel des LED-Pins zuruecklesen (1 = hoch, 0 = niedrig)
+    ESP_LOGI(TAG, "LED-Pin GPIO %d: geschrieben=%d, gelesen=%d",
+             GPIO_LED_STATUS, LED_OFF_LEVEL, gpio_get_level(GPIO_LED_STATUS));
     
     ESP_LOGI(TAG, "🎯 System ready - waiting for sensor data...");
 }

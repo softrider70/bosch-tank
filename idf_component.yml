@@ -1,6 +1,6 @@
 version: "1.1"
 description: "bosch-tank - ESP32 Application"
-url: "https://github.com/your-org/bosch-tank"
+url: "https://github.com/softrider70/bosch-tank"
 
 dependencies:
   # Add your component dependencies here

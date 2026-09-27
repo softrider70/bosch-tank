@@ -10,7 +10,8 @@ param(
     [string]$HostIp = "",
     [int]$HttpPort = 8070,
     [int]$StatusTimeoutSec = 240,
-    [int]$Baud = 921600
+    [int]$Baud = 921600,
+    [string]$DevicePass = $env:BOSCH_TANK_PASS
 )
 
 $ErrorActionPreference = "Stop"
@@ -236,6 +237,7 @@ if ($Mode -eq 'usb') {
     $binPath = Join-Path $repoRoot "build\bosch-tank.bin"
     $bootloaderPath = Join-Path $repoRoot "build\bootloader\bootloader.bin"
     $partitionPath = Join-Path $repoRoot "build\partition_table\partition-table.bin"
+    $otadataPath = Join-Path $repoRoot "build\ota_data_initial.bin"
     $lastBuiltCommitPath = Join-Path $repoRoot ".last_built_commit"
 
     if (Needs-Build -BinaryPath $binPath -CommitStatePath $lastBuiltCommitPath) {
@@ -251,6 +253,7 @@ if ($Mode -eq 'usb') {
         $missing = @()
         if (-not (Test-Path $bootloaderPath)) { $missing += "bootloader.bin" }
         if (-not (Test-Path $partitionPath)) { $missing += "partition-table.bin" }
+        if (-not (Test-Path $otadataPath)) { $missing += "ota_data_initial.bin" }
         if (-not (Test-Path $binPath)) { $missing += "bosch-tank.bin" }
 
         if ($missing.Count -gt 0) {
@@ -265,9 +268,13 @@ if ($Mode -eq 'usb') {
         Write-Host "  Bootloader: $bootloaderPath" -ForegroundColor Gray
         Write-Host "  Partition:  $partitionPath" -ForegroundColor Gray
         Write-Host "  App:        $binPath" -ForegroundColor Gray
-
+# Bootloader liegt beim ESP32 auf 0x1000 (nicht 0x0 - dort wuerde er
+        # nie gelesen). otadata wird mitgeschrieben, damit der Bootloader sicher
+        # ota_0 startet (sonst bliebe nach einem OTA die alte Version in ota_1 aktiv).
         & python -m esptool --port $UsbPort --baud $Baud `
-            write_flash 0x0 $bootloaderPath `
+            write_flash 0x1000 $bootloaderPath `
+                        0x8000 $partitionPath `
+                        0xd000 $otadatath `
                         0x8000 $partitionPath `
                         0x10000 $binPath 2>&1 | ForEach-Object {
                 Write-Host "  $_" -ForegroundColor Gray
@@ -335,6 +342,11 @@ if ($Mode -eq 'ota') {
         }
     }
 
+    if (-not $DevicePass) {
+        throw "Kein Geraetepasswort. Bitte -DevicePass <Passwort> angeben oder `$env:BOSCH_TANK_PASS setzen (steht im seriellen Startprotokoll)."
+    }
+    $authHeaders = @{ Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("admin:$DevicePass")) }
+
     $serverProc = $null
     try {
         $serverProc = Start-Process -FilePath "python" -ArgumentList "-m", "http.server", "$HttpPort", "--bind", "$HostIp" -WorkingDirectory (Join-Path $repoRoot "build") -PassThru -WindowStyle Hidden
@@ -348,13 +360,13 @@ if ($Mode -eq 'ota') {
         Write-Host "[OTA] Start: $startUri"
         Write-Host "[OTA] URL:   $otaUrl"
 
-        $startResp = Invoke-RestMethod -Method Post -Uri $startUri -ContentType "application/json" -Body $payload -TimeoutSec 15
+        $startResp = Invoke-RestMethod -Method Post -Uri $startUri -ContentType "application/json" -Body $payload -TimeoutSec 15 -Headers $authHeaders
         Write-Host ("[OTA] Antwort: {0}" -f ($startResp | ConvertTo-Json -Compress))
 
         $deadline = (Get-Date).AddSeconds($StatusTimeoutSec)
         do {
             try {
-                $statusResp = Invoke-RestMethod -Method Get -Uri $statusUri -TimeoutSec 8
+                $statusResp = Invoke-RestMethod -Method Get -Uri $statusUri -TimeoutSec 8 -Headers $authHeaders
                 $inProgress = [bool]$statusResp.ota.in_progress
                 $phase = [string]$statusResp.ota.phase
                 $msg = [string]$statusResp.ota.message

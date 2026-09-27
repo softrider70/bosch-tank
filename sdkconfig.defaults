@@ -42,8 +42,10 @@ CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 # ============================================================================
 # Memory Configuration
 # ============================================================================
-CONFIG_SPIRAM_USE=y
-CONFIG_SPIRAM_USE_MALLOC=y
+# Kein PSRAM auf diesem Board (ESP32-DEVKITC-V4): aktivieren wuerde nur
+# Speicher belegen, den es nicht gibt.
+# CONFIG_SPIRAM_USE=y
+# CONFIG_SPIRAM_USE_MALLOC=y
 
 # ============================================================================
 # I2C Configuration (for TOF sensor)
@@ -58,7 +60,13 @@ CONFIG_ESP_WIFI_ENABLED=y
 CONFIG_ESP_WIFI_SSID=""
 CONFIG_ESP_WIFI_PASSWORD=""
 CONFIG_WIFI_AP_SSID="bosch-tank"
-CONFIG_WIFI_AP_PASSWORD="12345678"
+# Kein Passwort im Repo. Der Fallback-AP ist in include/config.h bewusst als
+# offener AP konfiguriert (WIFI_PASS_AP_MODE "").
+CONFIG_WIFI_AP_PASSWORD=""
+
+# OTA-Rollback: neue Firmware gilt erst nach bestandenem Health-Check als gueltig
+# (Aufruf esp_ota_mark_app_valid_cancel_rollback() im Health-Check-Task).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_WIFI_AP_ASSIGN_IP=y
 CONFIG_WIFI_AP_IP_ADDR="10.1.1.1"
 CONFIG_WIFI_AP_NETMASK_ADDR="255.255.255.0"

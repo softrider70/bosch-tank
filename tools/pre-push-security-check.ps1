@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Pre-Push Security Check fuer LoRa ESP32-S3 Projekt
+    Pre-Push Security Check fuer bosch-tank (ESP32 Classic)
     Prueft den Code auf sicherheitskritische Informationen vor dem Push.
 .DESCRIPTION
     Sucht im gesamten Repository nach:
@@ -99,8 +99,10 @@ foreach ($file in $filesToCheck) {
 # Regel 3: NVS-Default-Werte mit sensiblen Daten
 # ====================================================================
 $nvsPatterns = @(
-    'nvs_config_set_str\("wifi_password",\s*"[A-Za-z0-9]{3,}"',
-    'nvs_config_set_str\("wifi_ssid",\s*"[A-Za-z0-9]{3,}"'
+    # In diesem Projekt heissen die NVS-Schluessel NVS_KEY_WIFI_PASS / NVS_KEY_WIFI_SSID.
+    # Die alten Muster (nvs_config_set_str) gab es hier nie - die Regel griff deshalb nie.
+    'nvs_set_str\([^;]*NVS_KEY_WIFI_PASS\s*,\s*"[^"]+"',
+    'nvs_set_str\([^;]*NVS_KEY_WIFI_SSID\s*,\s*"[^"]+"'
 )
 
 foreach ($file in $filesToCheck) {
@@ -127,8 +129,8 @@ $sensitiveFiles = @(
     '\.env\.\w+$',
     'credentials\.\w+$',
     'secret\.\w+$',
-    '\*\.pfx$',
-    '\*\.p12$',
+    '\.pfx$',
+    '\.p12$',
     '\*\.key$',
     'id_rsa$',
     'id_ed25519$'
