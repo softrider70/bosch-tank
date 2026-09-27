@@ -36,6 +36,21 @@
 #define TOF_SENSOR_ADDR     0x29                // Standard I2C address for VL6150X/VL6180X-compatible TOF sensors
 
 // ============================================================================
+// HARDWARE-VORGABE ToF-Sensor (hat Vorrang vor allem anderen!)
+// ============================================================================
+// Der Sensor misst nur unterhalb von ca. 18 cm zuverlaessig. Alles darueber
+// beantwortet er mit dem Festwert 25 cm. 25 cm heisst also "keine gueltige
+// Messung" - NICHT "Tank ist 25 cm leer".
+// Folgen fuer den Code:
+//   - Schwellwerte (OBEN/UNTEN/25cm-Stop) immer zwischen 1 und 17 cm halten
+//     (Server und Web-Oberflaeche pruefen das auch).
+//   - Messwert >= 25 cm: kein automatisches Befuellen, laufendes Befuellen
+//     wird geschlossen (25-cm-Sperre im valve_task).
+//   - Manuelles Befuellen darf bei >= 25 cm starten, laeuft aber nur mit der
+//     15-Sekunden-Ueberwachung und dem Stop-Schwellenwert.
+// Wer diese Regel aendert, muss die 25-cm-Sperre im valve_task mit anpassen.
+
+// ============================================================================
 // Sensor Configuration (Distance Measurement)
 // ============================================================================
 
@@ -108,14 +123,14 @@
 #define NVS_KEY_OTA_PHASE               "ota_phase"
 #define NVS_KEY_OTA_MESSAGE             "ota_message"
 #define NVS_KEY_OTA_LAST_ERROR          "ota_last_error"
-#define NVS_KEY_OTA_CURRENT_VERSION     "ota_current_version"
-#define NVS_KEY_OTA_TARGET_VERSION      "ota_target_version"
+#define NVS_KEY_OTA_CURRENT_VERSION     "ota_cur_ver"       // max. 15 Zeichen!
+#define NVS_KEY_OTA_TARGET_VERSION      "ota_tgt_ver"       // max. 15 Zeichen!
 #define NVS_KEY_OTA_URL                 "ota_url"
 #define NVS_KEY_EMERGENCY_STOP          "emerg_stop"
 #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
 #define NVS_KEY_ERROR_LOG               "error_log"
-#define NVS_KEY_WIFI_SLEEP_START_HOUR   "wifi_sleep_start"  // WiFi-Sleep Start-Stunde (0-23)
-#define NVS_KEY_WIFI_SLEEP_END_HOUR     "wifi_sleep_end"    // WiFi-Sleep End-Stunde (0-23)
+#define NVS_KEY_WIFI_SLEEP_START_HOUR   "sleep_start_h"     // WiFi-Sleep Start-Stunde (0-23)
+#define NVS_KEY_WIFI_SLEEP_END_HOUR     "sleep_end_h"       // WiFi-Sleep End-Stunde (0-23)
 
 // NVS String-Längen
 #define NVS_SSID_MAX_LEN                32

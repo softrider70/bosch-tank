@@ -59,6 +59,10 @@ CONFIG_ESP_WIFI_SSID=""
 CONFIG_ESP_WIFI_PASSWORD=""
 CONFIG_WIFI_AP_SSID="bosch-tank"
 CONFIG_WIFI_AP_PASSWORD="12345678"
+
+# OTA-Rollback: neue Firmware gilt erst nach bestandenem Health-Check als gueltig
+# (Aufruf esp_ota_mark_app_valid_cancel_rollback() im Health-Check-Task).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_WIFI_AP_ASSIGN_IP=y
 CONFIG_WIFI_AP_IP_ADDR="10.1.1.1"
 CONFIG_WIFI_AP_NETMASK_ADDR="255.255.255.0"

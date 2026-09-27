@@ -13,6 +13,7 @@ idf_component_register(
         app_update
         mbedtls
         esp_timer
+        lwip
     WHOLE_ARCHIVE
 )
 
