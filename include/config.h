@@ -21,6 +21,12 @@
 // mit aktiver Logik 0 ("aus") geschrieben hat.
 #define LED_ON_LEVEL        0
 #define LED_OFF_LEVEL       1
+// TEST-MUSTER: 1 = GPIO 2 blinkt dauernd (10 s an/aus im 250-ms-Takt).
+// Ergebnis 2026-09-27: am verbauten Modul aendert sich nichts - die rote LED
+// ist die Betriebsspannungs-Anzeige und haengt NICHT an GPIO 2. Deshalb 0.
+// Fuer eine externe LED (GPIO 2 -> Vorwiderstand -> LED -> GND) wieder auf 1
+// setzen bzw. das Blinken direkt nutzen.
+#define LED_TEST_PATTERN    0
 #define GPIO_I2C_SDA        21      // ToF-Sensor SDA (Data)
 #define GPIO_I2C_SCL        22      // ToF-Sensor SCL (Clock)
 #define GPIO_VALVE_CONTROL  32      // GPIO für externen Transistor zur Ventilsteuerung
@@ -132,6 +138,7 @@
 #define NVS_KEY_OTA_TARGET_VERSION      "ota_tgt_ver"       // max. 15 Zeichen!
 #define NVS_KEY_OTA_URL                 "ota_url"
 #define NVS_KEY_EMERGENCY_STOP          "emerg_stop"
+#define NVS_KEY_EMERGENCY_REASON        "emerg_reason"  // Grund des Notaus (max. 15 Zeichen)
 #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
 #define NVS_KEY_ERROR_LOG               "error_log"
 #define NVS_KEY_WIFI_SLEEP_START_HOUR   "sleep_start_h"     // WiFi-Sleep Start-Stunde (0-23)

@@ -368,6 +368,16 @@ static esp_err_t init_nvs(void)
         sys_state.emergency_stop_active = (bool)stored_emergency;
         ESP_LOGI(TAG, "Loaded emergency_stop_active from NVS: %d", sys_state.emergency_stop_active);
     }
+
+    // Grund des Notaus mitladen - sonst stand nach einem Neustart "Notaus aktiv"
+    // ohne erkennbare Ursache in der Oberflaeche.
+    size_t reason_len = sizeof(sys_state.emergency_stop_reason);
+    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_EMERGENCY_REASON, sys_state.emergency_stop_reason, &reason_len) == ESP_OK) {
+        sys_state.emergency_stop_reason[sizeof(sys_state.emergency_stop_reason) - 1] = '\0';
+        if (sys_state.emergency_stop_reason[0] != '\0') {
+            ESP_LOGW(TAG, "Notaus-Grund aus NVS: %s", sys_state.emergency_stop_reason);
+        }
+    }
     
     ESP_LOGI(TAG, "NVS initialized successfully");
     return ESP_OK;
@@ -1366,6 +1376,9 @@ static void trigger_emergency_stop(const char *reason)
     }
 
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 1);
+    if (reason != NULL) {
+        nvs_set_str(sys_state.nvs_handle, NVS_KEY_EMERGENCY_REASON, reason);
+    }
     persist_runtime_counters_locked();
     xSemaphoreGive(sys_state_mutex);
 
@@ -1384,6 +1397,7 @@ static void trigger_emergency_stop(const char *reason)
 static void reset_emergency_stop(void)
 {
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
+    nvs_set_str(sys_state.nvs_handle, NVS_KEY_EMERGENCY_REASON, "");
     sys_state.emergency_stop_active = false;
     strcpy(sys_state.emergency_stop_reason, "");
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 0);
@@ -3707,6 +3721,26 @@ static void valve_task(void *pvParameters)
             state_snapshot.manual_fill_active = false;
         }
 
+        // Diagnose: Statuszeile nur bei Aenderung oder alle 60 s (sonst zu viel Log)
+        {
+            static uint64_t last_heartbeat_ms = 0;
+            static int last_state = -1, last_filling = -1, last_req = -1, last_valve = -1;
+            int cur_req = state_snapshot.manual_fill_active ? 1 : 0;
+            int cur_valve = state_snapshot.valve_state ? 1 : 0;
+            bool changed = (current_tank_state != last_state) || ((int)filling != last_filling) ||
+                           (cur_req != last_req) || (cur_valve != last_valve);
+            if (changed || (now_ms - last_heartbeat_ms) >= 60000) {
+                last_heartbeat_ms = now_ms;
+                last_state = current_tank_state;
+                last_filling = filling;
+                last_req = cur_req;
+                last_valve = cur_valve;
+                ESP_LOGI(TAG, "[HB] state=%d dist=%u filling=%d manual_mode=%d req=%d valve=%d emerg=%d",
+                         current_tank_state, state_snapshot.sensor_distance_cm, filling, manual_mode,
+                         cur_req, cur_valve, state_snapshot.emergency_stop_active);
+            }
+        }
+
         if (filling && !state_snapshot.valve_state) {
             finalize_active_valve_session(now_ms);
             RESET_FILL_PROGRESS_VARS();
@@ -3946,6 +3980,12 @@ static void valve_task(void *pvParameters)
         // LED feedback: ON while opening, OFF when closed
         // Langsames Blinken bei WiFi-Sleep-Mode oder Notaus
         get_system_state_snapshot(&state_snapshot);
+#if LED_TEST_PATTERN
+        // TEST (2026-09-27): GPIO 2 blinkt 10 s lang zweimal pro Sekunde, dann
+        // 10 s Pause - wiederholt. Damit ist eindeutig sichtbar, ob an GPIO 2
+        // eine LED haengt (dann blinkt sie) oder nicht (dann bleibt alles still).
+        set_status_led(((now_ms % 20000) < 10000) && (((now_ms / 250) % 2) == 0));
+#else
         if (state_snapshot.emergency_stop_active || state_snapshot.wifi_sleep_active) {
             // Langsames Blinken (1 Sekunde an, 1 Sekunde aus)
             uint64_t blink_cycle = (now_ms / 1000) % 2;
@@ -3954,6 +3994,7 @@ static void valve_task(void *pvParameters)
             // Kopplung: LED an, solange das Ventil offen ist
             set_status_led(state_snapshot.valve_state);
         }
+#endif
         
         vTaskDelay(pdMS_TO_TICKS(TASK_VALVE_CHECK_MS));
     }
@@ -4654,6 +4695,9 @@ void app_main(void)
     ESP_LOGI(TAG, "   - Timeout (max fill): %d ms ← Safety cutoff after this duration", sys_state.timeout_max);
     // LED zeigt den Ventilzustand (aus, solange das Ventil geschlossen ist)
     set_status_led(false);
+    // Kontrolle: Pegel des LED-Pins zuruecklesen (1 = hoch, 0 = niedrig)
+    ESP_LOGI(TAG, "LED-Pin GPIO %d: geschrieben=%d, gelesen=%d",
+             GPIO_LED_STATUS, LED_OFF_LEVEL, gpio_get_level(GPIO_LED_STATUS));
     
     ESP_LOGI(TAG, "🎯 System ready - waiting for sensor data...");
 }
