@@ -81,7 +81,11 @@
 #define TOUCH_KEY_SAMPLE_MS             30      // Polling fuer Touch-Erkennung (schnellere Reaktion)
 #define TOUCH_KEY_FILTER_PERIOD_MS      10      // IIR Filter-Zyklus
 #define TOUCH_KEY_CALIBRATION_SAMPLES   12      // Messungen fuer Start-Baseline
-#define TOUCH_KEY_THRESHOLD_PERCENT     70      // Touch erkannt unter 70% der Basislinie (empfindlicher)
+// Schwelle: Touch erkannt, wenn der Wert unter diesen Anteil der Baseline faellt.
+// 85 = 15 % Absenkung genuegt. Am 2026-09-27 gemessen: ohne Beruehrung schwankt
+// der Wert nur um ~0.6 % (ruhig), eine kraeftige Beruehrung senkt ihn auf ~3 %.
+// Vorher stand hier 70 (30 % Absenkung) - damit wurden leichte Tipps nicht erkannt.
+#define TOUCH_KEY_THRESHOLD_PERCENT     85      // Touch erkannt unter 85% der Basislinie
 #define TOUCH_KEY_DEBOUNCE_COUNT        3       // Touch muss 3 Samples stabil sein (stabilere Erkennung)
 #define TOUCH_KEY_RELEASE_COUNT         3       // Release muss 3 Samples stabil sein (stabilere Release-Erkennung)
 #define TOUCH_KEY_DOUBLE_PRESS_MS       500     // Timeout fuer Double-Press Erkennung (500ms)

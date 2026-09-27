@@ -172,6 +172,7 @@ static uint16_t touch_key_baseline = 0;
 static uint32_t touch_press_count = 0;
 static uint8_t touch_last_presses = 0;
 static uint16_t touch_last_value = 0;
+static uint16_t touch_min_value = 0;   // niedrigster Wert seit dem Start (Diagnose)
 
 // WiFi State Variables
 typedef struct {
@@ -604,6 +605,17 @@ static void touch_key_task(void *pvParameters)
         uint16_t touch_value = 0;
         esp_err_t ret = touch_pad_read_filtered(TOUCH_KEY_PAD, &touch_value);
         touch_last_value = touch_value;
+        // Diagnose: neuen Tiefstwert mitschreiben und melden (zeigt die Wirkung
+        // einer Beruehrung; ohne Beruehrung passiert hier nichts)
+        if (touch_value > 0 && (touch_min_value == 0 || touch_value < touch_min_value)) {
+            touch_min_value = touch_value;
+            if (touch_key_baseline > 0 &&
+                touch_value < (uint16_t)(((uint32_t)touch_key_baseline * 95U) / 100U)) {
+                ESP_LOGI(TAG, "Touch-Rohwert neu tief: %u (Baseline %u = %u%%)",
+                         touch_value, touch_key_baseline,
+                         (unsigned)(((uint32_t)touch_value * 100U) / touch_key_baseline));
+            }
+        }
         uint64_t now_ms = esp_timer_get_time() / 1000;
 
         if (ret == ESP_OK && touch_value > 0 && touch_key_baseline > 0) {
@@ -1514,6 +1526,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"last_presses\":%u,"
         "\"baseline\":%u,"
         "\"value\":%u,"
+        "\"min_value\":%u,"
         "\"enabled\":%s"
         "},"
         "\"system\":{"
@@ -1558,6 +1571,7 @@ static esp_err_t status_handler(httpd_req_t *req)
         (unsigned int)touch_last_presses,
         (unsigned int)touch_key_baseline,
         (unsigned int)touch_last_value,
+        (unsigned int)touch_min_value,
         touch_key_enabled ? "true" : "false",
         free_mem,
         uptime_ms,
