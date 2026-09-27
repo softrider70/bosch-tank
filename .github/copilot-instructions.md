@@ -37,4 +37,15 @@ Notaus-Meldungen gehen per Telegram raus (`components/main/telegram.c`,
 Vorbild katzenbrunnen). Token und Chat-ID liegen im NVS (`tg_token`,
 `tg_chat`) und werden in den Einstellungen der Weboberflaeche gesetzt.
 
+## Hardware-Regeln (am Geraet belegt)
+
+- **TOF-Sensor (VL6150X): Gehaeuse/Metall darf ihn nicht beruehren** - beim
+  Zusammenbau am 2026-09-27 bekam er Metallkontakt, Folge waren dauerhaft
+  "0 cm"/keine Messung. Mit Isolierung (Klebeband) sofort wieder sauber.
+  Schwellen nur 1..17 cm; ab ~18 cm misst er unzuverlaessig, 25 cm ist der
+  Festwert fuer "keine Messung". Details: Skill `vl6180x-tof`.
+- **Sensorausfall darf keine Firmware zurueckrollen**: Der OTA-Gesundheitscheck
+  prueft nur noch Tasks (Sensor wird nur gemeldet, nicht bestraft) - sonst
+  rollte ein streikender Sensor jede neue Firmware zurueck (belegt 2026-09-27).
+
 Schwesterprojekt: `../delonghi-tank` (gleiche Grundarchitektur, andere Hardware).
