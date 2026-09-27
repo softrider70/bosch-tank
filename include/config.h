@@ -95,7 +95,7 @@
 // ============================================================================
 
 // Magnetventil-Timeout beim Befüllen
-#define VALVE_TIMEOUT_MAX_DEFAULT       60000   // 60 Sekunden max. Befüllung
+#define VALVE_TIMEOUT_MAX_DEFAULT       40000   // 40 Sekunden max. Befuellung (Notbremse)
 #define VALVE_TIMEOUT_CHECK_MS          1000    // Alle 1s prüfen
 #define TASK_VALVE_CHECK_MS             200     // Schnelle Reaktion fuer Sicherheitsabschaltung
 
@@ -106,7 +106,7 @@
 
 // Cooldown und manuelle Befuellung bei 25cm
 #define FILL_STOP_COOLDOWN_MS           5000    // 5 Sekunden Beruhigungszeit nach OBEN
-#define MANUAL_FILL_25CM_MONITOR_MS     15000   // 15 Sekunden Ueberwachung auf Werte < 25 (Fallback)
+#define MANUAL_FILL_25CM_MONITOR_MS     6000    // 6 Sekunden Ueberwachung (reicht fuer 25 -> 18 cm)
 #define MANUAL_FILL_25CM_STOP_THRESHOLD_CM 23   // Stop bei diesem Wert (Default 23cm)
 
 // Ventil-PWM oder Digital
