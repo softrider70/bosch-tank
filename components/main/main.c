@@ -3147,9 +3147,23 @@ function updateDashboard(force){
     if(cpuTopTaskEl) cpuTopTaskEl.textContent = system.cpu_top_task ? system.cpu_top_task : '-';
     if(cpuTopTaskPctEl) cpuTopTaskPctEl.textContent = Number(system.cpu_top_task_percent || 0).toFixed(0) + ' %';
     if(cpuTaskCountEl) cpuTaskCountEl.textContent = Number(system.cpu_task_count || 0).toFixed(0);
-    if (d.emergency_reason) {
-        reasonEl.textContent = (d.emergency ? 'Notaus-Grund: ' : 'Letzter Notaus-Grund: ') + d.emergency_reason;
+    // Notaus-Anzeige: rot nur bei aktivem Notaus. Ist alles in Ordnung, bleibt
+    // der letzte Grund als neutraler Hinweis stehen (grau) oder verschwindet.
+    if (d.emergency && d.emergency_reason) {
+        reasonEl.textContent = 'Notaus-Grund: ' + d.emergency_reason;
         reasonEl.style.display = 'block';
+        reasonEl.style.background = '#ffebee';
+        reasonEl.style.color = '#b71c1c';
+    } else if (d.emergency) {
+        reasonEl.textContent = 'Notaus aktiv (kein Grund hinterlegt)';
+        reasonEl.style.display = 'block';
+        reasonEl.style.background = '#ffebee';
+        reasonEl.style.color = '#b71c1c';
+    } else if (d.emergency_reason) {
+        reasonEl.textContent = 'Letzter Notaus-Grund: ' + d.emergency_reason;
+        reasonEl.style.display = 'block';
+        reasonEl.style.background = '#f3f4f6';
+        reasonEl.style.color = '#374151';
     } else {
         reasonEl.style.display = 'none';
     }
