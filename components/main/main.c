@@ -3646,7 +3646,7 @@ static void sensor_task(void *pvParameters)
                 system_state_t state_snapshot;
                 get_system_state_snapshot(&state_snapshot);
                 if (!state_snapshot.emergency_stop_active) {
-                    trigger_emergency_stop("Sensor reading too high (>30cm), possible sensor failure");
+                    trigger_emergency_stop("Sensor reading implausible (>300 cm), possible sensor failure");
                     get_system_state_snapshot(&state_snapshot);
                     ESP_LOGE(TAG, "🚨 EMERGENCY STOP - %s", state_snapshot.emergency_stop_reason);
                 }
@@ -4758,10 +4758,12 @@ void app_main(void)
     }
     
     ESP_LOGI(TAG, "✅ All tasks created and running");
+    system_state_t boot_snapshot;
+    get_system_state_snapshot(&boot_snapshot);
     ESP_LOGI(TAG, "📡 Configured thresholds:");
-    ESP_LOGI(TAG, "   - OBEN (Tank FULL):  %d cm ← Valve closes when reached", sys_state.threshold_top);
-    ESP_LOGI(TAG, "   - UNTEN (Tank EMPTY): %d cm ← Valve opens when reached", sys_state.threshold_bottom);
-    ESP_LOGI(TAG, "   - Timeout (max fill): %d ms ← Safety cutoff after this duration", sys_state.timeout_max);
+    ESP_LOGI(TAG, "   - OBEN (Tank FULL):  %d cm ← Valve closes when reached", boot_snapshot.threshold_top);
+    ESP_LOGI(TAG, "   - UNTEN (Tank EMPTY): %d cm ← Valve opens when reached", boot_snapshot.threshold_bottom);
+    ESP_LOGI(TAG, "   - Timeout (max fill): %d ms ← Safety cutoff after this duration", boot_snapshot.timeout_max);
     // LED zeigt den Ventilzustand (aus, solange das Ventil geschlossen ist)
     set_status_led(false);
     // Kontrolle: Pegel des LED-Pins zuruecklesen (1 = hoch, 0 = niedrig)
