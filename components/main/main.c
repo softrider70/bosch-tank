@@ -2537,12 +2537,19 @@ static esp_err_t telegram_status_handler(httpd_req_t *req)
     char chat_id[TG_CHAT_MAX_LEN] = {0};
     telegram_get_chat_id(chat_id, sizeof(chat_id));
 
-    // Der Token wird nie ausgegeben, nur ob einer gespeichert ist.
-    char json[192];
+    // Token im Klartext ausgeben - die Seite ist mit Passwort geschuetzt
+    // (Wunsch 2026-09-27, damit man den gespeicherten Wert pruefen kann).
+    char token[TG_TOKEN_MAX_LEN] = {0};
+    telegram_get_token(token, sizeof(token));
+    char token_escaped[(TG_TOKEN_MAX_LEN * 2) + 1] = {0};
+    json_escape_string(token, token_escaped, sizeof(token_escaped));
+
+    char json[256];
     snprintf(json, sizeof(json),
-             "{\"configured\":%s,\"chat_id\":\"%s\",\"token_set\":%s}",
+             "{\"configured\":%s,\"chat_id\":\"%s\",\"token\":\"%s\",\"token_set\":%s}",
              telegram_is_configured() ? "true" : "false",
              chat_id,
+             token_escaped,
              telegram_has_token() ? "true" : "false");
     send_json_response(req, json);
     return ESP_OK;
@@ -2861,7 +2868,7 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <label for="tg-chat">Chat-ID:</label>
 <input type="text" id="tg-chat" placeholder="z.B. 123456789">
 <label for="tg-token">Bot-Token:</label>
-<input type="password" id="tg-token" placeholder="leer = unveraendert">
+<input type="text" id="tg-token" placeholder="z.B. 123456789:AAH...">
 <div class="buttons">
 <button class="btn-success" onclick="saveTelegram()">Telegram speichern</button>
 <button class="btn-secondary" onclick="testTelegram()">Testnachricht</button>
@@ -3426,7 +3433,7 @@ function saveSettings(){const top = parseInt(document.getElementById('top').valu
 function loadWiFi(){fetch('/api/wifi/status').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {const c=d.wifi&&d.wifi.connected; document.getElementById('wifi-con').textContent=c?'Verbunden':'Getrennt'; document.getElementById('wifi-con').style.color=c?'#4caf50':'#f44336'; document.getElementById('wifi-ssid').textContent = (d.wifi && d.wifi.ssid) ? d.wifi.ssid : '-'; document.getElementById('wifi-rssi').textContent = (d.wifi && d.wifi.rssi) ? (d.wifi.rssi + ' dBm') : '-'; document.getElementById('wifi-ip').textContent = (d.wifi && d.wifi.ip) ? d.wifi.ip : '-';}).catch(e => {console.error('loadWiFi failed:', e); document.getElementById('wifi-con').textContent='Fehler'; showMsg('wifi', 'WiFi API Fehler', true);});}
 function connectWiFi(){const s = document.getElementById('new-ssid').value; const p = document.getElementById('new-pass').value; if(!s||!p) {showMsg('wifi', 'SSID und Pass erforderlich', true); return;} fetch('/api/wifi/config', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ssid: s, password: p})}).then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {showMsg('wifi', 'WiFi Update gesendet', false); document.getElementById('new-ssid').value = ''; document.getElementById('new-pass').value = ''; setTimeout(loadWiFi, 2000);}).catch(e => {console.error('connectWiFi failed:', e); showMsg('wifi', 'Fehler: '+e.message, true);});}
 function reset(){if(confirm('System wirklich neustarten?')) fetch('/api/system/reset', {method: 'POST'}).then(() => showMsg('wifi', 'Neustart...', false)).catch(e => showMsg('wifi', 'Fehler', true));}
-function loadTelegram(){fetch('/api/telegram').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {document.getElementById('tg-chat').value = d.chat_id || ''; const ok = !!d.configured; document.getElementById('tg-state').textContent = ok ? 'eingerichtet' : (d.token_set ? 'Chat-ID fehlt' : 'nicht eingerichtet'); document.getElementById('tg-state').style.color = ok ? '#4caf50' : '#f44336';}).catch(e => {console.error('loadTelegram failed:', e);});}
+function loadTelegram(){fetch('/api/telegram').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {document.getElementById('tg-chat').value = d.chat_id || ''; document.getElementById('tg-token').value = d.token || ''; const ok = !!d.configured; document.getElementById('tg-state').textContent = ok ? 'eingerichtet' : (d.token_set ? 'Chat-ID fehlt' : 'nicht eingerichtet'); document.getElementById('tg-state').style.color = ok ? '#4caf50' : '#f44336';}).catch(e => {console.error('loadTelegram failed:', e);});}
 function saveTelegram(){const t = document.getElementById('tg-token').value.trim(); const c = document.getElementById('tg-chat').value.trim(); if(!t && !c){showMsg('settings', 'Nichts zu speichern: Token oder Chat-ID eingeben', true); return;} fetch('/api/telegram', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: t, chat_id: c})}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status)); return r.json();}).then(() => {document.getElementById('tg-token').value = ''; showMsg('settings', 'Telegram gespeichert', false); loadTelegram();}).catch(e => {console.error('saveTelegram failed:', e); showMsg('settings', 'Telegram: '+e.message, true);});}
 function testTelegram(){fetch('/api/telegram/test', {method: 'POST'}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status)); return r.json();}).then(() => showMsg('settings', 'Testnachricht gesendet', false)).catch(e => {console.error('testTelegram failed:', e); showMsg('settings', 'Test: '+e.message, true);});}
 syncFillButton();
@@ -4351,6 +4358,11 @@ static bool system_time_valid(void)
  */
 static bool is_in_wifi_sleep_window(void)
 {
+    // Stromsparmodus abgeschaltet? Dann nie schlafen (Wunsch 2026-09-27).
+    if (!WIFI_SLEEP_ENABLED) {
+        return false;
+    }
+
     // Ohne gestellte Uhr ist keine Aussage moeglich -> niemals schlafen
     if (!system_time_valid()) {
         return false;

@@ -186,6 +186,9 @@
 #define WIFI_RETRY_MAX                  3
 
 // WiFi-Sleep-Mode (Stromsparfunktion)
+// Stromsparmodus (WiFi-Schlaf) EIN/AUS. Auf Wunsch 2026-09-27 abgeschaltet,
+// weil er zu frueh ansprang: 0 = aus (Zeitfenster hat dann keine Wirkung).
+#define WIFI_SLEEP_ENABLED              0
 #define WIFI_SLEEP_START_HOUR_DEFAULT   19      // Default: 19:00 Uhr
 #define WIFI_SLEEP_END_HOUR_DEFAULT     5       // Default: 05:00 Uhr
 #define WIFI_SLEEP_HYSTERESIS_MS        300000  // 5 Minuten Hysterese gegen Flackern

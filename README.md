@@ -108,6 +108,11 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
 
 ### WiFi-Sleep-Mode (Stromsparfunktion)
 
+**Zurzeit abgeschaltet** (Wunsch 2026-09-27, er sprang zu frueh an):
+`WIFI_SLEEP_ENABLED` in `include/config.h` steht auf `0` - die Funktion ist
+damit aus, das Zeitfenster hat keine Wirkung. Zum Reaktivieren auf `1` setzen
+und neu flashen.
+
 - **Zeitgesteuerte WiFi-Deaktivierung** mit konfigurierbarem Zeitfenster (Default: 19:00-05:00)
 - WiFi wird im Sleep-Zeitfenster deaktiviert, wenn:
   - Wasserstand >= OBEN (Tank voll)
@@ -184,7 +189,8 @@ Bei jedem Notaus und beim Aufheben schickt das Geraet eine Nachricht ueber
 Telegram (gleiche Technik wie im Schwesterprojekt katzenbrunnen). Einrichten
 in der Weboberflaeche unter Einstellungen:
 
-- **Bot-Token**: vom Bot-Vater (BotFather) - bleibt im NVS und wird nie angezeigt
+- **Bot-Token**: vom Bot-Vater (BotFather) - steht im NVS und wird in den
+  Einstellungen im Klartext angezeigt (die Seite ist passwortgeschuetzt)
 - **Chat-ID**: Zielchat (z.B. `123456789` oder `@kanalname`)
 - **Testnachricht** verschickt sofort eine Probenachricht
 
