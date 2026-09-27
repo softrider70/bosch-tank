@@ -3726,7 +3726,12 @@ static void valve_task(void *pvParameters)
             fill_start_time_ms = now_ms;
             last_progress_time_ms = fill_start_time_ms;
             last_no_progress_log_ms = fill_start_time_ms;
-            begin_valve_session(fill_start_time_ms, false);
+            // WICHTIG: hier true uebergeben! begin_valve_session setzt
+            // sys_state.manual_fill_active auf diesen Wert. Mit false (wie beim
+            // automatischen Befuellen) wird die Anforderung sofort geloescht und
+            // der Task schliesst das Ventil im naechsten Durchlauf wieder
+            // ("Valve CLOSED - manual fill stopped"). Fehler bis 2026-09-27.
+            begin_valve_session(fill_start_time_ms, true);
             progress_reference_distance = state_snapshot.sensor_distance_cm;
             progress_candidate_distance = state_snapshot.sensor_distance_cm;
             last_distance_cm = state_snapshot.sensor_distance_cm;
@@ -3881,7 +3886,12 @@ static void valve_task(void *pvParameters)
                     progress_candidate_distance = current_distance;
                 }
 
-                if ((now_ms - last_progress_time_ms) > state_snapshot.fill_progress_timeout_ms) {
+                // Kein Fortschritt ist beim manuellen Befuellen im nicht messbaren
+                // Bereich (Sensor meldet 25 cm) normal - dort greift die
+                // 25-cm-Ueberwachung mit Stop-Schwelle und Monitor-Timeout.
+                // Ohne diese Bedingung loeste jedes manuelle Befuellen dort nach
+                // dem Fortschritts-Timeout einen Notaus aus (Fehler bis 2026-09-27).
+                if (manual_fill_25cm_start_ms == 0 && (now_ms - last_progress_time_ms) > state_snapshot.fill_progress_timeout_ms) {
                     gpio_set_level(GPIO_VALVE_CONTROL, 0);
                     set_valve_and_manual_state(false, false);
                     trigger_emergency_stop(manual_mode
