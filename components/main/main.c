@@ -220,6 +220,7 @@ static void get_system_state_snapshot(system_state_t *snapshot);
 static void set_manual_fill_active(bool active);
 static esp_err_t request_manual_fill(bool enable, const char *source, bool *manual_fill_active_out, const char **message_out);
 static void trigger_emergency_stop(const char *reason);
+static void reset_emergency_stop(void);
 static void ota_update_task(void *pvParameters);
 static void ota_health_check_task(void *pvParameters);
 
@@ -657,15 +658,18 @@ static void touch_key_task(void *pvParameters)
                     ESP_LOGI(TAG, "Touch key: Dreifach-Press - WiFi bereits aktiv");
                 }
             } else if (presses == 2) {
-                // Doppelpress: Notaus ausloesen
+                // Doppelpress: Notaus umschalten (ausloesen ODER zuruecksetzen).
+                // Vorher liess sich der Notaus nur ueber die Weboberflaeche
+                // zuruecksetzen - am Geraet ging gar nichts.
                 system_state_t state_snapshot;
                 get_system_state_snapshot(&state_snapshot);
 
-                if (!state_snapshot.emergency_stop_active) {
+                if (state_snapshot.emergency_stop_active) {
+                    ESP_LOGI(TAG, "♻️  Touch key: Doppelpress - Notaus zuruecksetzen");
+                    reset_emergency_stop();
+                } else {
                     ESP_LOGI(TAG, "🚨 Touch key: Doppelpress - Notaus ausloesen");
                     trigger_emergency_stop("Touch key double press");
-                } else {
-                    ESP_LOGI(TAG, "Touch key: Doppelpress - Notaus bereits aktiv");
                 }
             } else {
                 // Einfacher Press: zuerst WiFi aufwecken, sonst manuelles Befuellen umschalten
@@ -1397,9 +1401,10 @@ static void trigger_emergency_stop(const char *reason)
 static void reset_emergency_stop(void)
 {
     xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
-    nvs_set_str(sys_state.nvs_handle, NVS_KEY_EMERGENCY_REASON, "");
     sys_state.emergency_stop_active = false;
-    strcpy(sys_state.emergency_stop_reason, "");
+    // Grund absichtlich stehen lassen: er bleibt als "letzter Notaus-Grund" in
+    // der Oberflaeche sichtbar. Sonst ist nach dem Zuruecksetzen nicht mehr
+    // nachvollziehbar, warum der Notaus kam (Fehlererfahrung 2026-09-27).
     nvs_set_u32(sys_state.nvs_handle, NVS_KEY_EMERGENCY_STOP, 0);
     nvs_commit(sys_state.nvs_handle);
     xSemaphoreGive(sys_state_mutex);
@@ -3093,7 +3098,7 @@ function updateDashboard(force){
     if(cpuTopTaskPctEl) cpuTopTaskPctEl.textContent = Number(system.cpu_top_task_percent || 0).toFixed(0) + ' %';
     if(cpuTaskCountEl) cpuTaskCountEl.textContent = Number(system.cpu_task_count || 0).toFixed(0);
     if (d.emergency_reason) {
-        reasonEl.textContent = 'Grund: ' + d.emergency_reason;
+        reasonEl.textContent = (d.emergency ? 'Notaus-Grund: ' : 'Letzter Notaus-Grund: ') + d.emergency_reason;
         reasonEl.style.display = 'block';
     } else {
         reasonEl.style.display = 'none';
