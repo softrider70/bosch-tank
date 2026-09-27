@@ -163,9 +163,15 @@ static i2c_master_dev_handle_t vl53l0x_dev_handle = NULL;
 #define GPIO_TOUCH_KEY 27
 #define TOUCH_KEY_FILTER_PERIOD_MS 10
 // Makros aus config.h werden verwendet, keine Redefinition
+#endif
+// Status der Touch-Taste: ausserhalb der Zielabfrage, damit der Status-Endpunkt
+// sie auf jedem Ziel ausgeben kann (auf anderen Zielen bleiben sie 0/false).
 static bool touch_key_enabled = false;
 static uint16_t touch_key_baseline = 0;
-#endif
+// Diagnose: erkannte Betaetigungen, letzte Auswertung (1/2/3 Tipps), letzter Messwert
+static uint32_t touch_press_count = 0;
+static uint8_t touch_last_presses = 0;
+static uint16_t touch_last_value = 0;
 
 // WiFi State Variables
 typedef struct {
@@ -597,6 +603,7 @@ static void touch_key_task(void *pvParameters)
     while (1) {
         uint16_t touch_value = 0;
         esp_err_t ret = touch_pad_read_filtered(TOUCH_KEY_PAD, &touch_value);
+        touch_last_value = touch_value;
         uint64_t now_ms = esp_timer_get_time() / 1000;
 
         if (ret == ESP_OK && touch_value > 0 && touch_key_baseline > 0) {
@@ -625,6 +632,7 @@ static void touch_key_task(void *pvParameters)
 
                 if (touch_active && release_samples >= TOUCH_KEY_RELEASE_COUNT) {
                     touch_active = false;
+                    touch_press_count++;
 
                     // Nur zaehlen - ausgewertet wird erst nach Ablauf des Fensters
                     if (press_count < 3) {
@@ -641,6 +649,7 @@ static void touch_key_task(void *pvParameters)
         if (press_count > 0 && (now_ms - last_press_time_ms) > TOUCH_KEY_DOUBLE_PRESS_MS) {
             uint8_t presses = press_count;
             press_count = 0;
+            touch_last_presses = presses;
 
             if (presses >= 3) {
                 // Dreifach-Press: WiFi aufwecken
@@ -1500,6 +1509,13 @@ static esp_err_t status_handler(httpd_req_t *req)
         "\"total_open_time_ms\":%llu,"
         "\"total_liters\":%.2f"
         "},"
+        "\"touch\":{"
+        "\"press_count\":%lu,"
+        "\"last_presses\":%u,"
+        "\"baseline\":%u,"
+        "\"value\":%u,"
+        "\"enabled\":%s"
+        "},"
         "\"system\":{"
         "\"free_heap_bytes\":%d,"
         "\"uptime_ms\":%lld,"
@@ -1538,6 +1554,11 @@ static esp_err_t status_handler(httpd_req_t *req)
         (unsigned long)state_snapshot.emergency_trigger_count,
         (unsigned long long)state_snapshot.total_open_time_ms,
         state_snapshot.total_liters,
+        (unsigned long)touch_press_count,
+        (unsigned int)touch_last_presses,
+        (unsigned int)touch_key_baseline,
+        (unsigned int)touch_last_value,
+        touch_key_enabled ? "true" : "false",
         free_mem,
         uptime_ms,
         wifi_snapshot.is_connected ? "true" : "false",
