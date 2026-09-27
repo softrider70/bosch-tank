@@ -27,6 +27,9 @@ bool telegram_is_configured(void);
 /** true, wenn ein Token gespeichert ist (Token wird nie ausgegeben). */
 bool telegram_has_token(void);
 
+/** Kopiert den Token im Klartext (fuer die Anzeige in den Einstellungen). */
+void telegram_get_token(char *buf, size_t size);
+
 /** Kopiert die Chat-ID zum Anzeigen (Token bleibt geheim). */
 void telegram_get_chat_id(char *buf, size_t size);
 

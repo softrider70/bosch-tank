@@ -130,6 +130,19 @@ bool telegram_has_token(void)
     return has;
 }
 
+void telegram_get_token(char *buf, size_t size)
+{
+    if (buf == NULL || size == 0) {
+        return;
+    }
+    buf[0] = '\0';
+    if (tg_mutex != NULL && xSemaphoreTake(tg_mutex, portMAX_DELAY) == pdTRUE) {
+        strncpy(buf, tg_bot_token, size - 1);
+        buf[size - 1] = '\0';
+        xSemaphoreGive(tg_mutex);
+    }
+}
+
 void telegram_get_chat_id(char *buf, size_t size)
 {
     if (buf == NULL || size == 0) {
