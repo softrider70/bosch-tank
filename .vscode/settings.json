@@ -1,14 +1,28 @@
 {
+    "chat.tools.global.autoApprove": true,
+    "git.ignoreLimitWarning": true,
+    "github.copilot.chat.welcomeMessage": "never",
+    "github.copilot.advanced": {
+        "debug.overrideChatModel": "deepseek-v4-flash",
+        "debug.testRequestMocking": false,
+        "debug.overrideProxyUrl": null
+    },
+    "github.copilot.chat.agent.model": {
+        "provider": "copilot",
+        "model": "deepseek-v4-flash"
+    },
+    "github.copilot.chat.askAgent.model": "deepseek-v4-flash",
     "[c]": {
         "editor.defaultFormatter": "ms-vscode.cpptools"
     },
     "idf.flashBaudRate": "921600",
-    "idf.portWin": "COM3",
     "idf.openOcdConfigs": [
         "board/esp32-wrover-kit-3.3v.cfg"
     ],
     "idf.customExtraVars": {
         "IDF_TARGET": "esp32"
     },
-    "idf.currentSetup": "C:\\esp\\v6.0\\esp-idf"
+    "idf.showOnboardingOnInit": false,
+    "idf.currentSetup": "C:\\Users\\win4g\\Downloads\\GitHub\\VS-Projekte\\CascadeProjects\\esp-idf",
+    "idf.port": "COM3"
 }

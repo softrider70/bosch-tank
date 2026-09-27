@@ -1,15 +1,18 @@
 # Aktiviert die vorhandene ESP-IDF Installation fuer diese PowerShell-Session.
 # Verwendung: . .\activate-esp-idf.ps1
+# Workaround fuer Python 3.14 + deutsches Locale: PYTHONUTF8 auf 0 setzen
 
 param(
     [string]$IdfPath = $env:IDF_PATH,
     [string]$IdfToolsPath = $env:IDF_TOOLS_PATH
 )
 
+$env:PYTHONUTF8 = "0"
+
 $idfCandidates = @(
     $IdfPath,
-    "C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\esp-idf",
-    "C:\esp\v6.0\esp-idf",
+    "$env:USERPROFILE\Downloads\GitHub\VS-Projekte\CascadeProjects\esp-idf",
+    "C:\esp\v6.1\esp-idf",
     "C:\esp\esp-idf"
 ) | Where-Object { $_ -and (Test-Path $_) }
 
@@ -20,18 +23,37 @@ if (-not $resolvedIdfPath) {
     return
 }
 
-$exportScript = Join-Path $resolvedIdfPath "export.ps1"
-if (-not (Test-Path $exportScript)) {
-    Write-Error "export.ps1 wurde unter '$resolvedIdfPath' nicht gefunden."
-    return
-}
-
 $env:IDF_PATH = $resolvedIdfPath
 if ($IdfToolsPath) {
     $env:IDF_TOOLS_PATH = $IdfToolsPath
 }
 
-& $exportScript | Out-Host
+# export.ps1 aus PowerShell heraus direkt ausfuehren
+$exportScript = Join-Path $resolvedIdfPath "export.ps1"
+if (Test-Path $exportScript) {
+    & $exportScript | Out-Host
+    Write-Host "ESP-IDF Umgebung aktiviert." -ForegroundColor Green
+} else {
+    # Fallback: export.bat parsen
+    $exportBat = Join-Path $resolvedIdfPath "export.bat"
+    if (Test-Path $exportBat) {
+        cmd /c "set PYTHONUTF8=0 && ""$exportBat"" > nul && set" | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)') {
+                Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+            }
+        }
+        Write-Host "ESP-IDF Umgebung aktiviert (via export.bat)." -ForegroundColor Green
+    } else {
+        Write-Error "Weder export.ps1 noch export.bat gefunden unter: $resolvedIdfPath"
+        return
+    }
+}
 
-Write-Host "ESP-IDF Umgebung aktiviert." -ForegroundColor Green
 Write-Host "IDF_PATH: $env:IDF_PATH" -ForegroundColor Cyan
+Write-Host "IDF_PYTHON_ENV_PATH: $env:IDF_PYTHON_ENV_PATH" -ForegroundColor Cyan
+
+# PATH entdoppeln. Mehrfaches Aktivieren laesst den PATH sonst ueber 32 KB
+# wachsen; Windows verweigert dann den Start von Prozessen und der Build laeuft
+# ohne Ausgabe ins Leere.
+$env:PATH = (($env:PATH -split ';' | Where-Object { $_ -ne '' }) |
+    Select-Object -Unique) -join ';'
