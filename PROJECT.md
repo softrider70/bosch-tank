@@ -32,7 +32,7 @@ components:
   
 external_dependencies:
   - VL6150X/VL6180X-compatible ToF sensor driver (I2C)
-  - MOSFET control circuit (GPIO-based PWM/digital)
+  - ILN44Z-Relaismodul (12 V, schaltet gegen Masse, 1 Ohm Strombegrenzung)
 
 security:
   nvs_encryption: true       # WiFi credentials persistent speichern
@@ -54,7 +54,7 @@ hardware:
   
   external_peripherals:
     - VL6150X/VL6180X-compatible Time-of-Flight Sensor (I2C address 0x29)
-    - 12V Solenoid Valve (via MOSFET module)
+    - 12V Solenoid Valve (ueber ILN44Z-Relaismodul)
     - 5V Power Supply Module
 
 features:

@@ -31,7 +31,7 @@ Dieses Projekt wurde aus `delonghi-tank` abgeleitet. Beide Projekte teilen die G
 | Merkmal | delonghi-tank | bosch-tank |
 |---------|---------------|------------|
 | Build-Skript | `tools/build.ps1` | `tools/build-and-commit.ps1` |
-| OTA-Server | Manuell starten | Automatisch durch Build-Skript |
+| OTA-Server | Manuell starten | Manuell starten |
 | Partition-Datei | `partitions_ota_custom.csv` | `partitions.csv` |
 | .venv | Ja | Nein |
 | Durchfluss-Default | 10.0 L/min | 1.0 L/min |
@@ -222,7 +222,7 @@ Die aktuelle Firmware validiert Konfiguration wie folgt:
 Wenn der automatische Flash nicht funktioniert oder die Ausgabe sichtbar sein soll:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
+powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
 ```
 
 **Wichtige Parameter:**
@@ -240,7 +240,7 @@ Wenn COM3 busy ist (PermissionError 13):
 powershell -Command "Stop-Process -Name python -Force"
 
 # Danach erneut flashen
-powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
+powershell -ExecutionPolicy Bypass -NoProfile -Command ". 'C:\Users\win4g\Downloads\GitHub\VS-Projekte\CascadeProjects\bosch-tank\activate-esp-idf.ps1'; idf.py -p COM3 flash monitor"
 ```
 
 ### Mutex-Initialisierungsfehler
@@ -299,7 +299,7 @@ USB:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\flash-mode.ps1 -Mode usb [-UsbPort <serial port>]
 ```
 
-Wenn `-UsbPort` nicht angegeben ist, versucht das Skript automatisch, einen seriellen Port zu erkennen. Bei mehreren gefundenen Ports verwendet es bevorzugt `COM3`, sonst fragt es dich zur Angabe auf.
+Wenn `-UsbPort` nicht angegeben ist, sucht das Skript selbst nach einem seriellen Port. Sind mehrere vorhanden, nimmt es den ersten gefundenen - dann bitte den Port mit `-UsbPort` fest vorgeben.
 
 OTA:
 
@@ -327,14 +327,10 @@ Was der OTA-Modus automatisch macht:
 - Port: `8070` (kein Admin nötig auf Windows)
 - Firmware-URL: `http://192.168.1.191:8070/bosch-tank.bin`
 
-**Automatischer Start durch Build-Skript:**
-Das Build-Skript `tools/build-and-commit.ps1` startet den OTA-Server automatisch nach jedem Build:
-- Prüft, ob der Server bereits läuft
-- Testet, ob der Server antwortet (HTTP HEAD auf `/bosch-tank.bin`)
-- Startet den Server bei Bedarf im Hintergrund (nicht blockend)
-- Firmware ist sofort unter `http://192.168.1.191:8070/bosch-tank.bin` erreichbar
+**Start durch das Build-Skript:**
+`tools/build-and-commit.ps1` baut, committet und pusht - es startet **keinen** OTA-Server. Der Server muss von Hand gestartet werden.
 
-**Manueller Start (falls nötig):**
+**Manueller Start:**
 ```powershell
 cd build && python -m http.server 8070
 ```

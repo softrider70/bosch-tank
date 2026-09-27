@@ -8,7 +8,7 @@ import shutil
 
 BIN_FILE = Path(__file__).resolve().parent.parent / "build" / "bosch-tank.bin"
 HOST = "0.0.0.0"
-PORT = 80
+PORT = 8070   # passt zur Voreinstellung der Weboberflaeche und zum README (kein Admin noetig)
 
 class BinOnlyHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):

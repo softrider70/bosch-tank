@@ -25,7 +25,8 @@ Makefile
 sdkconfig
 sdkconfig.old
 
-# Local diagnostics and ad-hoc experiment artifacts
+# Lokale Diagnose- und Ad-hoc-Artefakte
+git_diff_output.txt
 tools/__pycache__/
 *_monitor.txt
 *serial*.txt
