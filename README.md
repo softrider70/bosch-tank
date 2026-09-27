@@ -165,12 +165,12 @@ Die Web-Oberflaeche und alle API-Aufrufe sind mit einem Passwort geschuetzt
 (HTTP Basic Auth). Der Browser fragt von selbst danach - ein Login-Formular
 gibt es nicht, der Benutzername ist beliebig.
 
-- Das Passwort steht im **seriellen Startprotokoll**:
-  `🔑 Weboberflaeche: Benutzer beliebig, Passwort: 5vmgymws`
-- Es wird beim ersten Start erzeugt (8 Zeichen, ohne verwechselbare Zeichen)
-  und im NVS gespeichert. Es bleibt also ueber Neustarts und Updates gleich.
-- Vergessen? NVS loeschen (`idf.py -p COMx erase-flash`, danach neu flashen) -
-  dann wird ein neues Passwort erzeugt und wieder im Log ausgegeben.
+- Das Passwort steht in `include/config.h` (`API_PASSWORD_DEFAULT`, aktuell
+  `boschtank`) und zusaetzlich bei jedem Start im seriellen Protokoll:
+  `🔑 Weboberflaeche: Benutzer beliebig, Passwort: boschtank`
+- Bleibt `API_PASSWORD_DEFAULT` leer (`""`), wird beim ersten Start ein
+  zufaelliges Passwort erzeugt und im NVS gespeichert.
+- Aendern: Wert in `include/config.h` anpassen und neu flashen.
 - Fuer Skripte: Passwort in die Umgebungsvariable `BOSCH_TANK_PASS` legen.
   `ota.ps1`, `ota_upload.ps1` und `tools/flash-mode.ps1` nutzen sie automatisch.
 - Kurzzeitig abschalten: in `include/config.h` `API_AUTH_ENABLED` auf `0`

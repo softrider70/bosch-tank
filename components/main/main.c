@@ -406,14 +406,21 @@ static esp_err_t init_nvs(void)
         }
     }
     
-    // Passwort fuer die Weboberflaeche laden oder einmalig erzeugen
-    size_t api_pass_len = sizeof(api_password);
-    if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password, &api_pass_len) != ESP_OK ||
-        api_password[0] == '\0') {
-        generate_api_password();
+    // Passwort fuer die Weboberflaeche: fest aus config.h, sonst aus dem NVS,
+    // sonst neu erzeugen. Abschrift im NVS haelt beide Stellen gleich.
+    if (API_PASSWORD_DEFAULT[0] != '\0') {
+        snprintf(api_password, sizeof(api_password), "%s", API_PASSWORD_DEFAULT);
         nvs_set_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password);
         nvs_commit(sys_state.nvs_handle);
-        ESP_LOGW(TAG, "🔑 Neues Passwort fuer die Weboberflaeche erzeugt");
+    } else {
+        size_t api_pass_len = sizeof(api_password);
+        if (nvs_get_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password, &api_pass_len) != ESP_OK ||
+            api_password[0] == '\0') {
+            generate_api_password();
+            nvs_set_str(sys_state.nvs_handle, NVS_KEY_API_PASS, api_password);
+            nvs_commit(sys_state.nvs_handle);
+            ESP_LOGW(TAG, "🔑 Neues Passwort fuer die Weboberflaeche erzeugt");
+        }
     }
     ESP_LOGW(TAG, "🔑 Weboberflaeche: Benutzer beliebig, Passwort: %s", api_password);
 

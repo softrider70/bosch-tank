@@ -27,9 +27,10 @@ ESP-IDF (6.1) vorher aktivieren, PATH danach aufraeumen, dann im Projektordner:
 ## Zugangsschutz
 
 Weboberflaeche und API sind mit HTTP Basic Auth geschuetzt (`API_AUTH_ENABLED`
-in `include/config.h`). Benutzername beliebig, Passwort steht im NVS
-(`api_pass`) und im seriellen Startprotokoll
+in `include/config.h`). Benutzername beliebig, Passwort: `API_PASSWORD_DEFAULT`
+in `include/config.h` (aktuell `boschtank`); bei leerem Wert wird ein
+zufaelliges Passwort erzeugt und im NVS (`api_pass`) gespeichert. Aktives
+Passwort steht im seriellen Startprotokoll
 (`🔑 Weboberflaeche: ... Passwort: ...`). Skripte nutzen `$env:BOSCH_TANK_PASS`.
-Passwort vergessen: `idf.py erase-flash`, danach neu flashen.
 
 Schwesterprojekt: `../delonghi-tank` (gleiche Grundarchitektur, andere Hardware).

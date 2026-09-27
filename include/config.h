@@ -145,16 +145,18 @@
 #define NVS_KEY_EMERGENCY_REASON        "emerg_reason"  // Grund des Notaus (max. 15 Zeichen)
 #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
 #define NVS_KEY_API_PASS                "api_pass"      // Passwort fuer die Weboberflaeche (Basic Auth)
+#define NVS_KEY_WIFI_SLEEP_START_HOUR   "sleep_start_h"     // WiFi-Sleep Start-Stunde (0-23)
+#define NVS_KEY_WIFI_SLEEP_END_HOUR     "sleep_end_h"       // WiFi-Sleep End-Stunde (0-23)
 
 // Zugangsschutz der Weboberflaeche (HTTP Basic Auth).
-// Das Passwort wird beim ersten Start zufaellig erzeugt, im NVS gespeichert und
-// bei jedem Start im seriellen Log ausgegeben (Notfall: Log lesen).
+// Passwort: API_PASSWORD_DEFAULT fest vorgeben. Bleibt der Wert leer (""),
+// wird beim ersten Start ein zufaelliges Passwort erzeugt und im NVS gespeichert.
+// Das aktive Passwort steht bei jedem Start im seriellen Log.
 // Zum Abschalten (z. B. wenn man sich ausgesperrt hat): API_AUTH_ENABLED 0.
 #define API_AUTH_ENABLED                1
 #define API_AUTH_REALM                  "bosch-tank"
-#define API_PASSWORD_LEN                8
-#define NVS_KEY_WIFI_SLEEP_START_HOUR   "sleep_start_h"     // WiFi-Sleep Start-Stunde (0-23)
-#define NVS_KEY_WIFI_SLEEP_END_HOUR     "sleep_end_h"       // WiFi-Sleep End-Stunde (0-23)
+#define API_PASSWORD_LEN                16      // maximale Laenge des Passworts
+#define API_PASSWORD_DEFAULT            "boschtank"
 
 // NVS String-Längen
 #define NVS_SSID_MAX_LEN                32
