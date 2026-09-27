@@ -4,6 +4,38 @@ ESP32-Firmware fuer die Ueberwachung und Steuerung eines Kaffeemaschinen-Wassert
 
 Das Ventil wird jetzt ueber ein ILN44Z-Relaismodul angesteuert. Die Schaltung schaltet gegen Masse, der Relaiskreis arbeitet mit 12V und einem 1Ω-Widerstand zur Strombegrenzung, waehrend die Transformatorspannung beim Schalten konstant bleibt.
 
+## Schwesterprojekt: delonghi-tank
+
+Dieses Projekt wurde aus `delonghi-tank` abgeleitet. Beide Projekte teilen die Grundarchitektur (Web-UI, API, NVS-Config, OTA, Notaus), haben sich aber durch Hardware-Adaption und unabhaengige Feature-Entwicklung divergiert.
+
+### Hardware-Unterschiede
+
+| Merkmal | delonghi-tank | bosch-tank |
+|---------|---------------|------------|
+| Sensor | VL53L0X | VL6150X/VL6180X-kompatibel |
+| Ventil-GPIO | GPIO 16 (MOSFET) | GPIO 32 (ILN44Z-Relaismodul) |
+| Touch-Key | – | GPIO 27 (T7) |
+| ESP-IDF | v6.0.0 | v6.1 |
+
+### Nur in bosch-tank vorhanden
+
+- Touch-Key-Steuerung (Toggle, Doppelpress=Notaus, Lang=Reset, Stuck-Detection)
+- WiFi-Sleep-Mode (zeitgesteuerte Deaktivierung, Default 19:00-05:00)
+- Sensor-Begrenzung auf 18cm (Werte darueber als 25cm angezeigt)
+- UNTEN-Bestätigung (7 aufeinanderfolgende Messungen gegen Sensorrauschen)
+- Sonderbehandlung manuelle Fuellung bei 25cm mit 15s-Timeout
+- LED-Indikator fuer WiFi-Sleep und Notaus
+
+### Tooling-Unterschiede
+
+| Merkmal | delonghi-tank | bosch-tank |
+|---------|---------------|------------|
+| Build-Skript | `tools/build.ps1` | `tools/build-and-commit.ps1` |
+| OTA-Server | Manuell starten | Automatisch durch Build-Skript |
+| Partition-Datei | `partitions_ota_custom.csv` | `partitions.csv` |
+| .venv | Ja | Nein |
+| Durchfluss-Default | 10.0 L/min | 1.0 L/min |
+
 ## Aktueller Stand
 
 Der aktive Lauf- und Buildpfad liegt in `components/main/main.c`.
