@@ -145,8 +145,15 @@
 #define NVS_KEY_EMERGENCY_REASON        "emerg_reason"  // Grund des Notaus (max. 15 Zeichen)
 #define NVS_KEY_LAST_FULL_TIMESTAMP     "last_full"
 #define NVS_KEY_API_PASS                "api_pass"      // Passwort fuer die Weboberflaeche (Basic Auth)
+#define NVS_KEY_TG_TOKEN                "tg_token"      // Telegram Bot-Token
+#define NVS_KEY_TG_CHAT                 "tg_chat"       // Telegram Chat-ID
 #define NVS_KEY_WIFI_SLEEP_START_HOUR   "sleep_start_h"     // WiFi-Sleep Start-Stunde (0-23)
 #define NVS_KEY_WIFI_SLEEP_END_HOUR     "sleep_end_h"       // WiFi-Sleep End-Stunde (0-23)
+
+// Telegram-Benachrichtigung (Notaus-Meldungen).
+// Token und Chat-ID stehen im NVS und werden in der Weboberflaeche gesetzt.
+#define TG_TOKEN_MAX_LEN                64      // Bot-Token (typisch ~46 Zeichen)
+#define TG_CHAT_MAX_LEN                 32      // Chat-ID, auch "@kanalname"
 
 // Zugangsschutz der Weboberflaeche (HTTP Basic Auth).
 // Passwort: API_PASSWORD_DEFAULT fest vorgeben. Bleibt der Wert leer (""),
@@ -179,9 +186,13 @@
 #define WIFI_RETRY_MAX                  3
 
 // WiFi-Sleep-Mode (Stromsparfunktion)
-#define WIFI_SLEEP_START_HOUR_DEFAULT   19      // Default: 19:00 Uhr
+// Stromsparmodus (WiFi-Schlaf) EIN/AUS. 0 = aus (Zeitfenster ohne Wirkung).
+// 2026-09-27 abends wieder eingeschaltet, Fenster auf 21:00-05:00 gesetzt
+// (vorher 19:00-05:00, sprang dem Nutzer zu frueh an).
+#define WIFI_SLEEP_ENABLED              1
+#define WIFI_SLEEP_START_HOUR_DEFAULT   21      // Default: 21:00 Uhr
 #define WIFI_SLEEP_END_HOUR_DEFAULT     5       // Default: 05:00 Uhr
-#define WIFI_SLEEP_HYSTERESIS_MS        300000  // 5 Minuten Hysterese gegen Flackern
+#define WIFI_SLEEP_HYSTERESIS_MS        1200000 // 20 Minuten Hysterese (Wunsch 2026-09-27)
 
 // === AP-Mode IP Configuration ===
 // Landing-Page wird unter 10.1.1.1 erreichbar sein
@@ -229,6 +240,7 @@
 #define TASK_PRIO_SERVER                9       // Medium: HTTP server/UI
 #define TASK_PRIO_WIFI                  7       // Lower: WiFi monitor + DNS
 #define TASK_PRIO_MAIN                  5       // Low: Background work
+#define TASK_PRIO_TELEGRAM              4       // Sehr niedrig: Telegram-Versand
 
 #if CONFIG_FREERTOS_NUMBER_OF_CORES > 1
 #define TASK_CORE_NETWORK               0       // WiFi, HTTP and DNS stay on network core
@@ -245,6 +257,7 @@
 #define TASK_STACK_WATCHDOG             4096
 #define TASK_STACK_WIFI                 16384   // Increased from 4096 for complex initialization
 #define TASK_STACK_TOUCH                6144    // Touch-Key Polling
+#define TASK_STACK_TELEGRAM             8192    // Telegram-Versand (TLS braucht viel Stack)
 #define TASK_STACK_STACK_MONITOR        6144    // Stack-Überwachung für Laufzeitwarnungen
 #define TASK_STACK_OTA_HEALTH_CHECK    6144    // OTA Health-Check nach Firmware-Update
 

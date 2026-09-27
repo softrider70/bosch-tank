@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS "main.c" "telegram.c"
     INCLUDE_DIRS "../../include"
     REQUIRES 
         nvs_flash 
@@ -9,6 +9,7 @@ idf_component_register(
         esp_driver_touch_sens
         esp_wifi
         esp_http_server
+        esp_http_client
         esp_https_ota
         app_update
         mbedtls

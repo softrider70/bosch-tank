@@ -108,11 +108,16 @@ Der kapazitive Touch-Key ermöglicht die Steuerung direkt am Gerät ohne Web-UI:
 
 ### WiFi-Sleep-Mode (Stromsparfunktion)
 
-- **Zeitgesteuerte WiFi-Deaktivierung** mit konfigurierbarem Zeitfenster (Default: 19:00-05:00)
+Stand 2026-09-27 abends: **wieder aktiv**, Fenster nun **21:00-05:00**
+(vorher 19:00 - er sprang dem Nutzer zu frueh an). `WIFI_SLEEP_ENABLED` in
+`include/config.h` schaltet die Funktion (1 = an, 0 = aus); die Zeiten stehen
+im NVS und in den Einstellungen der Weboberflaeche.
+
+- **Zeitgesteuerte WiFi-Deaktivierung** mit konfigurierbarem Zeitfenster (Default: 21:00-05:00)
 - WiFi wird im Sleep-Zeitfenster deaktiviert, wenn:
   - Wasserstand >= OBEN (Tank voll)
   - Ventil geschlossen
-  - Tank für 5 Minuten voll war (Hysterese gegen Flackern)
+  - Tank für 20 Minuten voll war (Hysterese gegen Flackern)
 - WiFi bleibt aktiv, wenn:
   - Wasserstand < OBEN (Tank nicht voll)
   - Ventil offen (Befüllen läuft)
@@ -177,6 +182,21 @@ gibt es nicht, der Benutzername ist beliebig.
   setzen und neu flashen. Nur fuer Fehlersuche gedacht.
 - Die Seite `/generate_204` (Erkennung des Anmelde-Portals im AP-Modus) bleibt
   bewusst ohne Passwort, sonst meckern Handy und Windows beim Verbinden.
+
+### Telegram-Benachrichtigung (Notaus)
+
+Bei jedem Notaus und beim Aufheben schickt das Geraet eine Nachricht ueber
+Telegram (gleiche Technik wie im Schwesterprojekt katzenbrunnen). Einrichten
+in der Weboberflaeche unter Einstellungen:
+
+- **Bot-Token**: vom Bot-Vater (BotFather) - steht im NVS und wird in den
+  Einstellungen im Klartext angezeigt (die Seite ist passwortgeschuetzt)
+- **Chat-ID**: Zielchat (z.B. `123456789` oder `@kanalname`)
+- **Testnachricht** verschickt sofort eine Probenachricht
+
+Ohne Token und Chat-ID passiert nichts, es wird nur ins Log geschrieben.
+Meldungen im Chat: `🚨 bosch-tank: NOTAUS - <Grund>` und
+`✅ bosch-tank: Notaus aufgehoben`.
 
 ## Chat-Anforderungen
 
