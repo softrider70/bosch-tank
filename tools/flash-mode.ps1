@@ -236,6 +236,7 @@ if ($Mode -eq 'usb') {
     $binPath = Join-Path $repoRoot "build\bosch-tank.bin"
     $bootloaderPath = Join-Path $repoRoot "build\bootloader\bootloader.bin"
     $partitionPath = Join-Path $repoRoot "build\partition_table\partition-table.bin"
+    $otadataPath = Join-Path $repoRoot "build\ota_data_initial.bin"
     $lastBuiltCommitPath = Join-Path $repoRoot ".last_built_commit"
 
     if (Needs-Build -BinaryPath $binPath -CommitStatePath $lastBuiltCommitPath) {
@@ -251,6 +252,7 @@ if ($Mode -eq 'usb') {
         $missing = @()
         if (-not (Test-Path $bootloaderPath)) { $missing += "bootloader.bin" }
         if (-not (Test-Path $partitionPath)) { $missing += "partition-table.bin" }
+        if (-not (Test-Path $otadataPath)) { $missing += "ota_data_initial.bin" }
         if (-not (Test-Path $binPath)) { $missing += "bosch-tank.bin" }
 
         if ($missing.Count -gt 0) {
@@ -265,9 +267,13 @@ if ($Mode -eq 'usb') {
         Write-Host "  Bootloader: $bootloaderPath" -ForegroundColor Gray
         Write-Host "  Partition:  $partitionPath" -ForegroundColor Gray
         Write-Host "  App:        $binPath" -ForegroundColor Gray
-
+# Bootloader liegt beim ESP32 auf 0x1000 (nicht 0x0 - dort wuerde er
+        # nie gelesen). otadata wird mitgeschrieben, damit der Bootloader sicher
+        # ota_0 startet (sonst bliebe nach einem OTA die alte Version in ota_1 aktiv).
         & python -m esptool --port $UsbPort --baud $Baud `
-            write_flash 0x0 $bootloaderPath `
+            write_flash 0x1000 $bootloaderPath `
+                        0x8000 $partitionPath `
+                        0xd000 $otadatath `
                         0x8000 $partitionPath `
                         0x10000 $binPath 2>&1 | ForEach-Object {
                 Write-Host "  $_" -ForegroundColor Gray
