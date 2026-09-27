@@ -49,6 +49,7 @@ wifi_test_monitor.txt
 # Local build/flash state
 .last_built_commit
 .last_flash_mode.json
+.build_stamp
 
 # Embedded git repositories
 ota-safe-template/
