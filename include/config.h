@@ -192,7 +192,7 @@
 #define WIFI_SLEEP_ENABLED              1
 #define WIFI_SLEEP_START_HOUR_DEFAULT   21      // Default: 21:00 Uhr
 #define WIFI_SLEEP_END_HOUR_DEFAULT     5       // Default: 05:00 Uhr
-#define WIFI_SLEEP_HYSTERESIS_MS        300000  // 5 Minuten Hysterese gegen Flackern
+#define WIFI_SLEEP_HYSTERESIS_MS        1200000 // 20 Minuten Hysterese (Wunsch 2026-09-27)
 
 // === AP-Mode IP Configuration ===
 // Landing-Page wird unter 10.1.1.1 erreichbar sein

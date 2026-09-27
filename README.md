@@ -117,7 +117,7 @@ im NVS und in den Einstellungen der Weboberflaeche.
 - WiFi wird im Sleep-Zeitfenster deaktiviert, wenn:
   - Wasserstand >= OBEN (Tank voll)
   - Ventil geschlossen
-  - Tank für 5 Minuten voll war (Hysterese gegen Flackern)
+  - Tank für 20 Minuten voll war (Hysterese gegen Flackern)
 - WiFi bleibt aktiv, wenn:
   - Wasserstand < OBEN (Tank nicht voll)
   - Ventil offen (Befüllen läuft)

@@ -2334,15 +2334,17 @@ static void ota_health_check_task(void *pvParameters)
                 system_healthy = false;
             }
             
-            // Pruefe ob Sensor Daten kommen
+            // Sensordaten pruefen - aber NICHT als Rollback-Kriterium
+            // (Fehlererfahrung 2026-09-27: Der VL6150X faellt zeitweise von
+            // selbst aus. Daraufhin rollte der Check gute Firmware zurueck -
+            // jede Aenderung ging verloren. Sensorprobleme sind Hardware!)
             xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
             uint16_t sensor_dist = sys_state.sensor_distance_cm;
             bool sensor_stale = sys_state.sensor_data_stale;
             xSemaphoreGive(sys_state_mutex);
             
             if (sensor_dist == 0 || sensor_stale) {
-                ESP_LOGW(TAG, "Health-Check: Sensor Daten ungueltig oder stale");
-                system_healthy = false;
+                ESP_LOGW(TAG, "Health-Check: Sensor liefert aktuell keine gueltigen Daten (kein Rollback)");
             }
             
             if (system_healthy) {
@@ -4421,8 +4423,10 @@ static void wifi_task(void *pvParameters)
                 system_state_t state_snapshot;
                 get_system_state_snapshot(&state_snapshot);
 
-                // WiFi deaktivieren, wenn Tank voll und Ventil geschlossen
-                if (state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top && !state_snapshot.valve_state) {
+                // WiFi deaktivieren, wenn Tank voll, Ventil geschlossen und
+                // KEIN Notaus aktiv (bei Notaus bleibt die Oberflaeche erreichbar)
+                if (state_snapshot.sensor_distance_cm <= state_snapshot.threshold_top &&
+                    !state_snapshot.valve_state && !state_snapshot.emergency_stop_active) {
                     // Hysterese-Prüfung: Tank muss 5 Minuten voll sein
                     if (state_snapshot.wifi_sleep_hysteresis_start_ms == 0) {
                         xSemaphoreTake(sys_state_mutex, portMAX_DELAY);
