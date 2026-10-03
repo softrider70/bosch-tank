@@ -26,12 +26,14 @@ ESP-IDF (6.1) vorher aktivieren, PATH danach aufraeumen, dann im Projektordner:
 
 ## Zugangsschutz
 
-Weboberflaeche und API sind mit HTTP Basic Auth geschuetzt (`API_AUTH_ENABLED`
-in `include/config.h`). Benutzername beliebig, Passwort: `API_PASSWORD_DEFAULT`
-in `include/config.h` (aktuell `boschtank`); bei leerem Wert wird ein
-zufaelliges Passwort erzeugt und im NVS (`api_pass`) gespeichert. Aktives
-Passwort steht im seriellen Startprotokoll
-(`🔑 Weboberflaeche: ... Passwort: ...`). Skripte nutzen `$env:BOSCH_TANK_PASS`.
+Weboberflaeche und API sind passwortgeschuetzt. Browser bekommen eine
+Anmeldeseite (Formular + Sitzungs-Cookie `bt_sess`); Skripte nutzen HTTP Basic.
+Der Schalter in den Einstellungen (`/api/auth`, NVS `auth_on`) kann den Schutz
+im Betrieb aus-/einschalten. Passwort: `API_PASSWORD_DEFAULT` in
+`include/config.h` (aktuell `boschtank`); bei leerem Wert wird ein zufaelliges
+Passwort erzeugt und im NVS (`api_pass`) gespeichert. Aktives Passwort steht im
+seriellen Startprotokoll (`🔑 Weboberflaeche: ... Passwort: ...`). Skripte
+nutzen `$env:BOSCH_TANK_PASS`.
 
 Notaus-Meldungen gehen per Telegram raus (`components/main/telegram.c`,
 Vorbild katzenbrunnen). Token und Chat-ID liegen im NVS (`tg_token`,

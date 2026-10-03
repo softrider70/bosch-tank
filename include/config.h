@@ -147,6 +147,7 @@
 #define NVS_KEY_API_PASS                "api_pass"      // Passwort fuer die Weboberflaeche (Basic Auth)
 #define NVS_KEY_TG_TOKEN                "tg_token"      // Telegram Bot-Token
 #define NVS_KEY_TG_CHAT                 "tg_chat"       // Telegram Chat-ID
+#define NVS_KEY_AUTH_ON                 "auth_on"       // Zugangsschutz ein/aus (1/0)
 #define NVS_KEY_WIFI_SLEEP_START_HOUR   "sleep_start_h"     // WiFi-Sleep Start-Stunde (0-23)
 #define NVS_KEY_WIFI_SLEEP_END_HOUR     "sleep_end_h"       // WiFi-Sleep End-Stunde (0-23)
 
