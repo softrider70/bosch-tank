@@ -182,6 +182,23 @@ static uint8_t touch_max_dip = 0;      // laengste Absenkung seit dem Start (Dia
 // erzeugt, im NVS abgelegt und bei jedem Start im seriellen Log ausgegeben.
 static char api_password[API_PASSWORD_LEN + 1] = {0};
 
+// Zugangsschutz-Schalter (in den Einstellungen umschaltbar, im NVS gespeichert)
+// und Sitzungs-Kennung fuer die Formular-Anmeldung (Cookie "bt_sess").
+static bool auth_enabled = true;
+static char auth_session_token[33] = {0};
+
+/**
+ * @brief Erzeugt die Sitzungs-Kennung fuer die Formular-Anmeldung.
+ */
+static void generate_session_token(void)
+{
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {
+        auth_session_token[i] = hex[esp_random() % 16];
+    }
+    auth_session_token[32] = '\0';
+}
+
 /**
  * @brief Erzeugt ein zufaelliges Passwort (ohne i, l, o, 0, 1 - verwechselbar).
  */
@@ -424,6 +441,14 @@ static esp_err_t init_nvs(void)
         }
     }
     ESP_LOGW(TAG, "🔑 Weboberflaeche: Benutzer beliebig, Passwort: %s", api_password);
+
+    // Zugangsschutz-Schalter laden (Standard: an) und Sitzungs-Kennung erzeugen
+    uint8_t auth_on_val = 1;
+    if (nvs_get_u8(sys_state.nvs_handle, NVS_KEY_AUTH_ON, &auth_on_val) == ESP_OK) {
+        auth_enabled = (auth_on_val != 0);
+    }
+    generate_session_token();
+    ESP_LOGW(TAG, "🔑 Zugangsschutz: %s", auth_enabled ? "aktiv" : "aus");
 
     ESP_LOGI(TAG, "NVS initialized successfully");
     return ESP_OK;
@@ -1516,6 +1541,31 @@ static bool api_authorized(httpd_req_t *req)
 #if !API_AUTH_ENABLED
     return true;
 #else
+    // Schalter in den Einstellungen: aus = keine Pruefung
+    if (!auth_enabled) {
+        return true;
+    }
+
+    // 1) Formular-Anmeldung: Sitzungs-Cookie "bt_sess"
+    char cookie[160] = {0};
+    if (httpd_req_get_hdr_value_str(req, "Cookie", cookie, sizeof(cookie)) == ESP_OK) {
+        const char *pos = strstr(cookie, "bt_sess=");
+        if (pos != NULL) {
+            pos += 8;
+            char value[33];
+            size_t i = 0;
+            while (pos[i] != '\0' && pos[i] != ';' && i < 32) {
+                value[i] = pos[i];
+                i++;
+            }
+            value[i] = '\0';
+            if (i == 32 && strcmp(value, auth_session_token) == 0) {
+                return true;
+            }
+        }
+    }
+
+    // 2) Skripte: HTTP Basic wie bisher
     char header[96] = {0};
     size_t len = httpd_req_get_hdr_value_len(req, "Authorization");
     if (len == 0 || len >= sizeof(header)) {
@@ -2727,12 +2777,115 @@ static void dns_server_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+// Anmeldeseite fuer Browser (statt des nativen Passwort-Dialogs). Ein echtes
+// Formular laesst Passwortmanager speichern und ausfuellen; der Name steht
+// gross im Kopf, damit die Zuordnung eindeutig ist.
+static const char login_page_html[] = R"html(<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BOSCH TANK - Anmeldung</title>
+<meta name="application-name" content="BOSCH TANK">
+<style>
+body{font-family:Arial,sans-serif;background:linear-gradient(180deg,#5d76df 0%,#7ea7ff 100%);display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0}
+.box{background:#fff;padding:26px;border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,0.18);width:280px}
+h1{font-size:21px;text-align:center;color:#1f2937;margin:0 0 4px 0;letter-spacing:1px}
+p.sub{font-size:12px;text-align:center;color:#6b7280;margin:0 0 16px 0}
+input{width:100%;padding:10px;margin:5px 0;box-sizing:border-box;border-radius:8px;border:1px solid #cbd5e1;font-size:14px}
+button{width:100%;padding:11px;margin-top:10px;background:#22c55e;color:#fff;border:0;border-radius:8px;font-size:15px;font-weight:bold}
+#m{color:#dc2626;font-size:13px;height:16px;text-align:center;margin-top:8px}
+.hint{font-size:11px;color:#9ca3af;margin-top:12px;text-align:center}
+</style></head>
+<body><div class="box"><h1>BOSCH TANK</h1><p class="sub">Bitte anmelden</p>
+<form onsubmit="return doLogin(event)">
+<input type="text" id="u" name="username" autocomplete="username" placeholder="Benutzer (beliebig)" value="admin">
+<input type="password" id="p" name="password" autocomplete="current-password" placeholder="Passwort" autofocus>
+<button type="submit">Anmelden</button></form><div id="m"></div>
+<p class="hint">Passwort siehe serielles Startprotokoll<br>(Zeile "Weboberflaeche ... Passwort")</p></div>
+<script>function doLogin(e){e.preventDefault();fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:document.getElementById('p').value})}).then(r=>{if(!r.ok)throw 0;location.href='/';}).catch(()=>{document.getElementById('m').textContent='Falsches Passwort';});return false;}</script>
+</body></html>)html";
+
+/**
+ * @brief Handler: POST /api/login - Anmeldung aus der Seite (setzt Cookie)
+ */
+static esp_err_t login_handler(httpd_req_t *req)
+{
+    char buf[128] = {0};
+    if (receive_request_body(req, buf, sizeof(buf)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request");
+        return ESP_FAIL;
+    }
+
+    char password[API_PASSWORD_LEN + 1] = {0};
+    if (!parse_json_string_field(buf, "\"password\"", password, sizeof(password)) ||
+        strcmp(password, api_password) != 0) {
+        httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Falsches Passwort");
+        return ESP_FAIL;
+    }
+
+    char cookie[128];
+    snprintf(cookie, sizeof(cookie),
+             "bt_sess=%s; Path=/; Max-Age=604800; HttpOnly; SameSite=Lax",
+             auth_session_token);
+    httpd_resp_set_hdr(req, "Set-Cookie", cookie);
+    send_json_response(req, "{\"status\":\"OK\"}");
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler: GET /api/auth - Status des Zugangsschutzes
+ */
+static esp_err_t auth_status_handler(httpd_req_t *req)
+{
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
+
+    char json[96];
+    snprintf(json, sizeof(json), "{\"enabled\":%s,\"changeable\":%s}",
+             auth_enabled ? "true" : "false",
+             API_AUTH_ENABLED ? "true" : "false");
+    send_json_response(req, json);
+    return ESP_OK;
+}
+
+/**
+ * @brief Handler: POST /api/auth - Zugangsschutz ein-/ausschalten
+ */
+static esp_err_t auth_set_handler(httpd_req_t *req)
+{
+    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
+
+    char buf[64] = {0};
+    if (receive_request_body(req, buf, sizeof(buf)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request");
+        return ESP_FAIL;
+    }
+    if (strstr(buf, "\"enabled\":") == NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "enabled fehlt");
+        return ESP_FAIL;
+    }
+
+    bool want = (strstr(buf, "\"enabled\":true") != NULL);
+    auth_enabled = want;
+    nvs_set_u8(sys_state.nvs_handle, NVS_KEY_AUTH_ON, want ? 1 : 0);
+    nvs_commit(sys_state.nvs_handle);
+    ESP_LOGW(TAG, "🔑 Zugangsschutz umgeschaltet: %s", want ? "aktiv" : "aus");
+
+    char json[64];
+    snprintf(json, sizeof(json), "{\"status\":\"OK\",\"enabled\":%s}", want ? "true" : "false");
+    send_json_response(req, json);
+    return ESP_OK;
+}
+
 /**
  * @brief Handler: GET / - Root HTML page with modern UI
  */
 static esp_err_t index_handler(httpd_req_t *req)
 {
-    if (api_require_auth(req) != ESP_OK) return ESP_FAIL;
+    // Ohne Anmeldung: Anmeldeseite ausliefern (kein Browser-Dialog) -
+    // so koennen Passwortmanager das Passwort zuverlaessig speichern.
+    if (!api_authorized(req)) {
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        return httpd_resp_send(req, login_page_html, HTTPD_RESP_USE_STRLEN);
+    }
     // Lightweight HTML UI - no emojis, minimal size for reliable transfer
     static const char index_html[] = R"html(<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -2876,6 +3029,13 @@ input{width:100%;padding:8px;margin:0 0 8px 0;box-sizing:border-box;border-radiu
 <button class="btn-secondary" onclick="testTelegram()">Testnachricht</button>
 </div>
 <div class="status-row"><span>Status:</span><span id="tg-state">-</span></div>
+</div>
+<div style="margin-top:20px;padding-top:15px;border-top:1px solid #ddd">
+<p style="font-size:12px;margin:0 0 10px 0"><b>Zugangsschutz (Passwort):</b></p>
+<label style="font-size:13px"><input type="checkbox" id="auth-on" style="width:auto;margin-right:6px">Passwortschutz aktiv</label>
+<p style="font-size:11px;color:#666;margin:6px 0 0 0">Aus = keine Anmeldung mehr noetig (nur im eigenen Netz nutzen).</p>
+<div class="buttons"><button class="btn-success" onclick="saveAuth()">Speichern</button></div>
+<div class="status-row"><span>Status:</span><span id="auth-state">-</span></div>
 </div>
 </div>
 
@@ -3287,7 +3447,7 @@ function switchTab(evt, t){
   document.querySelectorAll('.tab-btn').forEach(e => e.classList.remove('active'));
   document.getElementById(t).classList.add('active');
     if(evt && evt.target) evt.target.classList.add('active');
-  if(t==='settings'){loadSettings(); loadTelegram();}
+  if(t==='settings'){loadSettings(); loadTelegram(); loadAuth();}
   if(t==='wifi') loadWiFi();
   if(t==='diagnostics'){
       setDefaultOtaUrl();
@@ -3438,6 +3598,8 @@ function reset(){if(confirm('System wirklich neustarten?')) fetch('/api/system/r
 function loadTelegram(){fetch('/api/telegram').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {document.getElementById('tg-chat').value = d.chat_id || ''; document.getElementById('tg-token').value = d.token || ''; const ok = !!d.configured; document.getElementById('tg-state').textContent = ok ? 'eingerichtet' : (d.token_set ? 'Chat-ID fehlt' : 'nicht eingerichtet'); document.getElementById('tg-state').style.color = ok ? '#4caf50' : '#f44336';}).catch(e => {console.error('loadTelegram failed:', e);});}
 function saveTelegram(){const t = document.getElementById('tg-token').value.trim(); const c = document.getElementById('tg-chat').value.trim(); if(!t && !c){showMsg('settings', 'Nichts zu speichern: Token oder Chat-ID eingeben', true); return;} fetch('/api/telegram', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({token: t, chat_id: c})}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status)); return r.json();}).then(() => {document.getElementById('tg-token').value = ''; showMsg('settings', 'Telegram gespeichert', false); loadTelegram();}).catch(e => {console.error('saveTelegram failed:', e); showMsg('settings', 'Telegram: '+e.message, true);});}
 function testTelegram(){fetch('/api/telegram/test', {method: 'POST'}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status)); return r.json();}).then(() => showMsg('settings', 'Testnachricht gesendet', false)).catch(e => {console.error('testTelegram failed:', e); showMsg('settings', 'Test: '+e.message, true);});}
+function loadAuth(){fetch('/api/auth').then(r => {if(!r.ok) throw new Error('API error: '+r.status); return r.json();}).then(d => {document.getElementById('auth-on').checked = !!d.enabled; document.getElementById('auth-state').textContent = d.enabled ? 'aktiv' : 'aus'; document.getElementById('auth-state').style.color = d.enabled ? '#4caf50' : '#f44336';}).catch(e => {console.error('loadAuth failed:', e);});}
+function saveAuth(){const on = document.getElementById('auth-on').checked; fetch('/api/auth', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: on})}).then(async r => {if(!r.ok) throw new Error(await r.text() || ('API error: '+r.status)); return r.json();}).then(() => {showMsg('settings', on ? 'Passwortschutz ist aktiv' : 'Passwortschutz ist aus', false); loadAuth();}).catch(e => {console.error('saveAuth failed:', e); showMsg('settings', 'Zugangsschutz: '+e.message, true);});}
 syncFillButton();
 syncValveIndicator(false);
 syncSaveButton();
@@ -4506,7 +4668,7 @@ static httpd_handle_t start_webserver(void)
     config.stack_size = TASK_STACK_SERVER;
     config.task_priority = TASK_PRIO_SERVER;
     config.max_open_sockets = MAX_OPEN_SOCKETS;
-    config.max_uri_handlers = 32;   // 15 API + 3 Telegram + 9 Captive + Reserve
+    config.max_uri_handlers = 32;   // 15 API + 3 Telegram + 3 Zugangsschutz + 9 Captive
     config.core_id = TASK_CORE_NETWORK;
     
     httpd_handle_t server = NULL;
@@ -4668,6 +4830,31 @@ static httpd_handle_t start_webserver(void)
             .user_ctx = NULL
         };
         httpd_register_uri_handler(server, &tg_test_uri);
+
+        // Register POST /api/login + GET/POST /api/auth (Zugangsschutz)
+        httpd_uri_t login_uri = {
+            .uri = "/api/login",
+            .method = HTTP_POST,
+            .handler = login_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &login_uri);
+
+        httpd_uri_t auth_status_uri = {
+            .uri = "/api/auth",
+            .method = HTTP_GET,
+            .handler = auth_status_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &auth_status_uri);
+
+        httpd_uri_t auth_set_uri = {
+            .uri = "/api/auth",
+            .method = HTTP_POST,
+            .handler = auth_set_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &auth_set_uri);
         
         // Captive portal detection endpoints (Apple, Android, Windows, Firefox)
         const char *captive_uris[] = {

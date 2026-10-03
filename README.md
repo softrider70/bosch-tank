@@ -166,20 +166,25 @@ im NVS und in den Einstellungen der Weboberflaeche.
 
 ### Zugangsschutz (Benutzer und Passwort)
 
-Die Web-Oberflaeche und alle API-Aufrufe sind mit einem Passwort geschuetzt
-(HTTP Basic Auth). Der Browser fragt von selbst danach - ein Login-Formular
-gibt es nicht, der Benutzername ist beliebig.
+Die Web-Oberflaeche und alle API-Aufrufe sind mit einem Passwort geschuetzt.
+Im Browser erscheint eine **Anmeldeseite** ("BOSCH TANK") - ein echtes Formular,
+damit Passwortmanager das Passwort speichern und ausfuellen koennen. Danach
+haelt ein Sitzungs-Cookie die Anmeldung (bis zum Neustart). Skripte nutzen
+weiterhin HTTP Basic Auth.
 
-- Das Passwort steht in `include/config.h` (`API_PASSWORD_DEFAULT`, aktuell
-  `boschtank`) und zusaetzlich bei jedem Start im seriellen Protokoll:
-  `🔑 Weboberflaeche: Benutzer beliebig, Passwort: boschtank`
+- **Schalter in der Oberflaeche**: Einstellungen -> "Zugangsschutz (Passwort)"
+  schaltet die Anmeldung im Betrieb aus oder wieder ein (bleibt im NVS
+  gespeichert). Aus = offen, nur fuers eigene Netz gedacht.
+- Passwort: `API_PASSWORD_DEFAULT` in `include/config.h` (aktuell `boschtank`) -
+  steht zusaetzlich bei jedem Start im seriellen Protokoll:
+  `🔑 Weboberflaeche: Benutzer beliebig, Passwort: boschtank`. Benutzername beliebig.
 - Bleibt `API_PASSWORD_DEFAULT` leer (`""`), wird beim ersten Start ein
   zufaelliges Passwort erzeugt und im NVS gespeichert.
 - Aendern: Wert in `include/config.h` anpassen und neu flashen.
 - Fuer Skripte: Passwort in die Umgebungsvariable `BOSCH_TANK_PASS` legen.
   `ota.ps1`, `ota_upload.ps1` und `tools/flash-mode.ps1` nutzen sie automatisch.
-- Kurzzeitig abschalten: in `include/config.h` `API_AUTH_ENABLED` auf `0`
-  setzen und neu flashen. Nur fuer Fehlersuche gedacht.
+- Notaus-Weg (falls der Schalter nicht erreichbar ist): `API_AUTH_ENABLED` auf
+  `0` setzen und neu flashen.
 - Die Seite `/generate_204` (Erkennung des Anmelde-Portals im AP-Modus) bleibt
   bewusst ohne Passwort, sonst meckern Handy und Windows beim Verbinden.
 
